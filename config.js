@@ -9,8 +9,8 @@
    anon key는 공개되어도 되는 키다. RLS가 실제 보안을 담당한다.
    service_role 키는 절대 여기에 넣지 말 것.
 ------------------------------------------------------------ */
-const SUPABASE_URL = '';        // 예: 'https://abcdefgh.supabase.co'
-const SUPABASE_ANON_KEY = '';   // 예: 'eyJhbGciOi...'
+const SUPABASE_URL = 'https://ieuluoovykntxzmgstsy.supabase.co';        // 예: 'https://abcdefgh.supabase.co'
+const SUPABASE_ANON_KEY = 'sb_publishable_Gb3jT9pk8zIGUG0alhBZ0g_JvSTL6Mp';   // 예: 'eyJhbGciOi...'
 
 /* ── 상수 ──────────────────────────────────────────────────── */
 const CFG = {

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>유료어플쓰다열받아서만든어플</title>
+<meta name="theme-color" content="#0ea5e9">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Autoreg">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{
+  --sky-50:#f0f9ff; --sky-100:#e0f2fe; --sky-200:#bae6fd; --sky-300:#7dd3fc;
+  --sky-400:#38bdf8; --sky-500:#0ea5e9; --sky-600:#0284c7; --sky-700:#0369a1;
+  --sky-900:#0c4a6e;
+  --ink:#0f172a; --mid:#475569; --soft:#94a3b8; --line:#e2e8f0;
+  --ok:#10b981; --warn:#f59e0b; --bad:#ef4444;
+  --bg:#f7fbff; --card:#ffffff;
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-t:env(safe-area-inset-top,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Apple SD Gothic Neo','Noto Sans KR',sans-serif;
+  background:var(--bg); color:var(--ink);
+  font-size:15px; line-height:1.45;
+  padding-top:var(--safe-t);
+  overscroll-behavior-y:contain;
+}
+button,input,select{font-family:inherit;font-size:inherit;color:inherit}
+button{border:0;background:none;cursor:pointer}
+.hide{display:none !important}
+
+/* ── 스플래시 스크린 */
+#splashScreen {
+  position: fixed; inset: 0; z-index: 9999;
+  background-color: var(--sky-200); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.4s ease-out; 
+}
+.hide-splash { opacity: 0; pointer-events: none; }
+
+/* ── 상단 헤더 */
+header{
+  position:sticky;top:0;z-index:40;
+  background:linear-gradient(135deg,var(--sky-500),var(--sky-400));
+  color:#fff;padding:14px 16px 12px;
+  box-shadow:0 2px 12px rgba(14,165,233,.25);
+}
+header .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+header h1{margin:0;font-size:17px;font-weight:800;letter-spacing:-.3px}
+header .sub{font-size:11.5px;opacity:.92;margin-top:2px}
+.hbtn{
+  background:rgba(255,255,255,.2);border-radius:10px;padding:7px 11px;
+  color:#fff;font-size:12.5px;font-weight:700;
+}
+.hbtn:active{background:rgba(255,255,255,.35)}
+
+/* ── 본문 */
+main{padding:14px 14px calc(96px + var(--safe-b));max-width:760px;margin:0 auto}
+.card{
+  background:var(--card);border-radius:16px;padding:16px;
+  box-shadow:0 1px 3px rgba(15,23,42,.06),0 6px 18px rgba(14,165,233,.06);
+  margin-bottom:12px;border:1px solid #eef6fc;
+}
+.card h2{margin:0 0 10px;font-size:15px;font-weight:800;color:var(--sky-900);
+  display:flex;align-items:center;justify-content:space-between;gap:8px}
+.muted{color:var(--mid);font-size:12.5px}
+.tiny{font-size:11px;color:var(--soft)}
+
+/* ── 월간 및 주간 캘린더 (과거 선택 가능) */
+.monthly-cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 8px; margin-bottom: 4px; }
+.m-day { text-align: center; font-size: 12px; padding: 6px 0; border-radius: 50%; color: var(--mid); cursor: pointer; }
+.m-day:hover { background-color: var(--sky-100); }
+.m-day.done { background-color: var(--sky-200); color: var(--sky-900); font-weight: 800; }
+.m-day.today { border: 1.5px solid var(--sky-400); font-weight: 800; color: var(--sky-700); }
+
+.weekbar{display:flex;gap:6px}
+.daycell{
+  flex:1;text-align:center;padding:9px 2px 8px;border-radius:12px;
+  background:var(--sky-50);border:1.5px solid transparent;position:relative;min-width:0; cursor:pointer;
+}
+.daycell .dw{font-size:10.5px;color:var(--mid);font-weight:700}
+.daycell .dd{font-size:16px;font-weight:800;margin-top:2px}
+.daycell .tag{font-size:9px;color:var(--sky-600);font-weight:700;margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.daycell.today{background:var(--sky-500);border-color:var(--sky-600)}
+.daycell.today .dw,.daycell.today .dd,.daycell.today .tag{color:#fff}
+.daycell.done{background-color: var(--sky-200); border-color: var(--sky-300);}
+.daycell.done .dw, .daycell.done .dd, .daycell.done .tag { color: var(--sky-900); }
+.daycell.rest{opacity:.55}
+.weeknav{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+.weeknav b{font-size:13px;color:var(--sky-700)}
+.navb{padding:4px 10px;border-radius:8px;background:var(--sky-100);color:var(--sky-700);font-weight:800}
+
+/* ── 루틴 템플릿 카드 */
+.routine-card {
+  background: var(--sky-50); border-radius: 12px; padding: 16px; margin-bottom: 12px;
+  display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--sky-100);
+}
+.routine-card:active { background: var(--sky-100); }
+.routine-header { display: flex; justify-content: space-between; align-items: center; }
+.routine-title { font-size: 16px; font-weight: 800; color: var(--ink); }
+.routine-desc { font-size: 13px; color: var(--mid); }
+.routine-meta { font-size: 12px; color: var(--soft); margin-top: 4px; }
+
+/* ── 유산소 대시보드 */
+.cardio-dash { background: #f0fdf4; border-left: 3px solid #10b981; padding: 12px; margin-bottom: 12px; border-radius: 8px; }
+
+/* ── 버튼 */
+.btn{
+  display:block;width:100%;text-align:center;padding:14px;border-radius:14px;
+  background:linear-gradient(135deg,var(--sky-500),var(--sky-400));color:#fff;
+  font-weight:800;font-size:15px;box-shadow:0 4px 14px rgba(14,165,233,.3);
+}
+.btn:active{transform:translateY(1px)}
+.btn.ghost{background:var(--sky-100);color:var(--sky-700);box-shadow:none}
+.btn.sm{padding:9px;font-size:13px;border-radius:11px}
+.btn.danger{background:#fee2e2;color:#b91c1c;box-shadow:none}
+.btnrow{display:flex;gap:8px}
+.btnrow>*{flex:1}
+
+/* ── 운동 카드 */
+.exhead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.exname{font-weight:800;font-size:14.5px;flex:1;min-width:0}
+.exmeta{font-size:11px;color:var(--soft);margin-top:2px}
+.target{
+  background:var(--sky-50);border-left:3px solid var(--sky-400);
+  padding:7px 10px;border-radius:8px;margin:9px 0 6px;
+  font-size:12.5px;color:var(--sky-900);font-weight:700;
+}
+.target span{font-weight:500;color:var(--mid)}
+.prev-record { font-size: 11.5px; color: var(--sky-600); margin-top: 5px; font-weight: 700; }
+.setprev{font-size:10.5px;color:var(--soft);padding:0 0 4px 32px;line-height:1.4}
+.setprev b{color:var(--sky-700)}
+.setprev .sep{color:var(--line);margin:0 3px}
+
+/* ── 세트 행 */
+.setrow{
+  display:grid;grid-template-columns:26px 1fr 1fr 66px 40px;gap:6px;
+  align-items:center;padding:5px 0;border-top:1px dashed var(--line);
+}
+.setrow.head{border-top:0;padding-bottom:2px}
+.setrow.head span{font-size:10px;color:var(--soft);text-align:center;font-weight:700}
+.setno{font-size:12px;font-weight:800;color:var(--sky-600);text-align:center}
+.setrow input,.setrow select{
+  width:100%;padding:9px 4px;border:1.5px solid var(--line);border-radius:10px;
+  text-align:center;background:#fff;font-size:15px;font-weight:700;min-width:0;
+}
+.setrow input:focus,.setrow select:focus{outline:0;border-color:var(--sky-400);background:var(--sky-50)}
+.setrow select{font-size:13px;font-weight:700;-webkit-appearance:none;appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--sky-500) 50%),linear-gradient(135deg,var(--sky-500) 50%,transparent 50%);
+  background-position:calc(100% - 13px) 52%,calc(100% - 8px) 52%;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:16px}
+.chk{
+  width:38px;height:38px;border-radius:11px;background:var(--sky-100);
+  color:var(--sky-600);font-size:17px;font-weight:900;display:flex;
+  align-items:center;justify-content:center;
+}
+.chk.on{background:var(--ok);color:#fff}
+.setrow.done input,.setrow.done select{background:#f0fdf4;border-color:#bbf7d0}
+
+/* ── 하단 탭 */
+nav.tabs{
+  position:fixed;left:0;right:0;bottom:0;z-index:50;
+  background:rgba(255,255,255,.96);backdrop-filter:blur(10px);
+  border-top:1px solid var(--line);display:flex;
+  padding-bottom:var(--safe-b);
+}
+nav.tabs button{flex:1;padding:14px 0;color:var(--soft);font-size:13px;font-weight:800;}
+nav.tabs button.on{color:var(--sky-600)}
+
+/* ── 휴식 타이머 */
+#restbar{
+  position:fixed;
+  left:12px; right:12px;
+  bottom:calc(70px + var(--safe-b));
+  z-index:100;
+  border-radius:16px;
+  background:linear-gradient(135deg,var(--sky-600),var(--sky-500));
+  color:#fff; padding:12px 14px;
+  box-shadow:0 8px 26px rgba(2,132,199,.4);
+}
+#restbar .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+#restbar .t{font-size:30px;font-weight:900;font-variant-numeric:tabular-nums;letter-spacing:-1px}
+#restbar .lbl{font-size:11px;opacity:.9}
+#restbar .acts{display:flex;gap:6px}
+#restbar .acts button{background:rgba(255,255,255,.22);border-radius:9px;padding:8px 10px;
+  color:#fff;font-weight:800;font-size:12.5px}
+#restbar .prog{height:4px;background:rgba(255,255,255,.25);border-radius:3px;margin-top:8px;overflow:hidden}
+#restbar .prog i{display:block;height:100%;background:#fff;border-radius:3px;transition:width .3s linear}
+#restbar.over{background:linear-gradient(135deg,#059669,#10b981)}
+
+/* ── 세션 진행 바 */
+.sessbar{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  background:var(--sky-900);color:#fff;border-radius:14px;padding:11px 13px;margin-bottom:12px;
+}
+.sessbar .l{font-size:11px;opacity:.8}
+.sessbar .v{font-size:19px;font-weight:900;font-variant-numeric:tabular-nums}
+
+/* ── 편집 폼 */
+.field{margin-bottom:9px}
+.field label{display:block;font-size:11px;font-weight:800;color:var(--mid);margin-bottom:3px}
+.field input,.field select,.field textarea{
+  width:100%;padding:10px;border:1.5px solid var(--line);border-radius:11px;background:#fff;
+}
+.field input:focus,.field select:focus{outline:0;border-color:var(--sky-400)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+
+/* ── 모달 */
+.modal{position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.5);
+  display:flex;align-items:flex-end;justify-content:center}
+.modal .sheet{
+  background:#fff;width:100%;max-width:560px;border-radius:20px 20px 0 0;
+  padding:16px 16px calc(16px + var(--safe-b));max-height:88vh;overflow:auto;
+}
+.modal h3{margin:0 0 12px;font-size:16px;font-weight:800;color:var(--sky-700)}
+
+/* ── 기타 */
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:800}
+.pill.blue{background:var(--sky-100);color:var(--sky-700)}
+.pill.green{background:#d1fae5;color:#047857}
+.pill.amber{background:#fef3c7;color:#b45309}
+.pill.red{background:#fee2e2;color:#b91c1c}
+.exitem{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line)}
+.exitem:last-child{border-bottom:0}
+.exitem .g{flex:1;min-width:0}
+.exitem .n{font-weight:700;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.exitem .m{font-size:11px;color:var(--soft)}
+.iconb{width:32px;height:32px;border-radius:9px;background:var(--sky-50);color:var(--sky-600);
+  display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;flex:0 0 auto}
+.iconb.del{background:#fef2f2;color:#dc2626}
+table.hist{width:100%;border-collapse:collapse;font-size:12px}
+table.hist th{background:var(--sky-50);color:var(--sky-700);padding:6px 4px;font-size:10.5px}
+table.hist td{padding:6px 4px;border-top:1px solid var(--line);text-align:center}
+.spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:6px}
+.spark i{flex:1;background:var(--sky-300);border-radius:2px 2px 0 0;min-height:2px}
+.spark i.last{background:var(--sky-600)}
+.toast{
+  position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + var(--safe-b));
+  background:var(--ink);color:#fff;padding:10px 16px;border-radius:12px;font-size:13px;
+  font-weight:700;z-index:200;box-shadow:0 6px 20px rgba(0,0,0,.25);
+}
+.emptybox{text-align:center;padding:26px 10px;color:var(--soft);font-size:13px}
+</style>
+</head>
+<body>
+
+<!-- 스플래시 및 시작 화면 -->
+<div id="splashScreen">
+  <div style="text-align: center;">
+    <div style="font-size: 26px; font-weight: 900; line-height: 1.3; text-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+      유료어플쓰다열받아서<br>만든어플
+    </div>
+    <button id="splashBtn" class="btn" style="display: none; background: #fff; color: var(--sky-600); margin: 24px auto 0; width: auto; padding: 12px 32px; font-size: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" onclick="App.startFromSplash()">초기 세팅 시작하기</button>
+  </div>
+</div>
+
+<header>
+  <div class="row">
+    <div>
+      <h1 id="hTitle">오늘의 훈련</h1>
+      <div class="sub" id="hSub">—</div>
+      <div style="margin-top:5px"><span id="syncBadge" class="pill blue">로컬</span></div>
+    </div>
+    <button class="hbtn" id="hAction">설정</button>
+  </div>
+</header>
+
+<main>
+  <section id="viewHome"></section>
+  <section id="viewWorkout" class="hide"></section>
+  <section id="viewProgram" class="hide"></section>
+  <section id="viewStats" class="hide"></section>
+  <section id="viewSettings" class="hide"></section>
+</main>
+
+<div id="restbar" class="hide">
+  <div class="top">
+    <div>
+      <div class="lbl" id="restLbl">휴식</div>
+      <div class="t" id="restT">0:00</div>
+    </div>
+    <div class="acts">
+      <button onclick="App.restAdd(-15)">−15초</button>
+      <button onclick="App.restAdd(15)">+15초</button>
+      <button onclick="App.restStop()">종료</button>
+    </div>
+  </div>
+  <div class="prog"><i id="restProg" style="width:100%"></i></div>
+</div>
+
+<nav class="tabs">
+  <button data-tab="home" class="on">홈</button>
+  <button data-tab="workout">운동</button>
+  <button data-tab="program">루틴 편집</button>
+  <button data-tab="stats">기록</button>
+  <button data-tab="settings">설정</button>
+</nav>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="engine.js"></script>
+<script src="store.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -398,10 +398,28 @@ const Store = {
       .in('post_id', ids);
     if (e2) throw e2;
 
+    let comments = [];
+    try {
+      const { data: cm, error: e3 } = await sb.from(CFG.TABLE_COMMENTS)
+        .select('id,post_id,user_id,author_name,body,created_at')
+        .in('post_id', ids)
+        .order('created_at', { ascending: true });
+      if (e3) throw e3;
+      comments = cm || [];
+    } catch (e) {
+      console.warn('comments fetch skipped', e);
+      comments = [];
+    }
+
     const byPost = {};
     (reacts || []).forEach(r => {
       if (!byPost[r.post_id]) byPost[r.post_id] = [];
       byPost[r.post_id].push(r);
+    });
+    const commentsByPost = {};
+    comments.forEach(c => {
+      if (!commentsByPost[c.post_id]) commentsByPost[c.post_id] = [];
+      commentsByPost[c.post_id].push(c);
     });
 
     const myId = this.user.id;
@@ -413,7 +431,11 @@ const Store = {
         if (counts[r.reaction_type] != null) counts[r.reaction_type]++;
         if (r.user_id === myId) mine[r.reaction_type] = true;
       });
-      return Object.assign({}, p, { counts, mine });
+      return Object.assign({}, p, {
+        counts,
+        mine,
+        comments: commentsByPost[p.id] || []
+      });
     });
   },
 
@@ -436,11 +458,53 @@ const Store = {
   async deleteCommunityPost(postId) {
     if (!cloudEnabled() || !this.user) throw new Error('로그인이 필요합니다');
     if (!postId) throw new Error('게시글이 없습니다');
-    const { error } = await sb.from(CFG.TABLE_POSTS)
+    initSupabase();
+    if (!globalThis.sb) throw new Error('Supabase 연결이 없습니다');
+
+    /* select()로 실제 삭제된 행을 확인 — RLS로 0건이면 에러 없이 넘어가는 함정 방지 */
+    const { data, error } = await globalThis.sb.from(CFG.TABLE_POSTS)
       .delete()
       .eq('id', postId)
-      .eq('user_id', this.user.id);
+      .eq('user_id', this.user.id)
+      .select('id');
+
     if (error) throw error;
+    if (!data || !data.length) {
+      throw new Error(
+        '삭제되지 않았습니다. 본인 글이 아니거나, Supabase에 community_posts DELETE 정책(RLS)이 없을 수 있습니다.'
+      );
+    }
+    return true;
+  },
+
+  async addComment(postId, body) {
+    if (!cloudEnabled() || !this.user) throw new Error('로그인이 필요합니다');
+    const text = String(body || '').trim();
+    if (!text) throw new Error('댓글을 입력하세요');
+    if (!postId) throw new Error('게시글이 없습니다');
+    const row = {
+      post_id: postId,
+      user_id: this.user.id,
+      author_name: this.user.name || '익명',
+      body: text
+    };
+    const { data, error } = await sb.from(CFG.TABLE_COMMENTS).insert(row).select().single();
+    if (error) throw error;
+    return data;
+  },
+
+  async deleteComment(commentId) {
+    if (!cloudEnabled() || !this.user) throw new Error('로그인이 필요합니다');
+    if (!commentId) throw new Error('댓글이 없습니다');
+    const { data, error } = await sb.from(CFG.TABLE_COMMENTS)
+      .delete()
+      .eq('id', commentId)
+      .eq('user_id', this.user.id)
+      .select('id');
+    if (error) throw error;
+    if (!data || !data.length) {
+      throw new Error('댓글이 삭제되지 않았습니다. 본인 댓글이 아니거나 RLS 정책을 확인하세요.');
+    }
     return true;
   },
 

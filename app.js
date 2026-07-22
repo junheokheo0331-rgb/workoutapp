@@ -600,9 +600,10 @@ const App = {
     this.releaseWakeLock();
     toast(`세션 종료 · ${doneN}세트 기록`);
     this.cur = null;
-    if (doneN > 0) {
+    if (doneN > 0 && confirm('운동완료 후 오운완 글을 올리시겠습니까?')) {
       Store.postWorkoutComplete(vol).then(p => {
         if (p && this.tab === 'community') this.renderCommunity(true);
+        else if (p) toast('오운완이 커뮤니티에 올라갔습니다');
       });
     }
     this.go('home');
@@ -964,7 +965,7 @@ const App = {
   async renderCommunity(force) {
     const root = el('viewCommunity');
     if (!root) return;
-    el('hSub').textContent = '피드 · 감정 반응';
+    el('hSub').textContent = '피드 · 반응 · 댓글';
 
     if (!cloudEnabled()) {
       root.innerHTML = `<div class="card"><div class="emptybox">
@@ -1032,6 +1033,8 @@ const App = {
         <span>${r.emoji}</span><span class="cnt" id="rc_${p.id}_${r.key}">${n}</span>
       </button>`;
     }).join('');
+    const comments = Array.isArray(p.comments) ? p.comments : [];
+    const commentList = comments.map(c => this.commentRowHtml(c)).join('');
     return `<div class="feed-card ${p.post_type === 'workout_complete' ? 'workout' : ''}" id="post_${p.id}">
       ${delBtn}
       <div class="fc-head">
@@ -1040,7 +1043,85 @@ const App = {
       </div>
       <div class="fc-body">${esc(p.body)}</div>
       <div class="react-bar" id="reactbar_${p.id}">${reacts}</div>
+      <div class="fc-comments" id="comments_${p.id}">
+        <div class="fc-comments-label">댓글 ${comments.length}</div>
+        <div class="fc-comment-list" id="clist_${p.id}">${commentList || '<div class="fc-comment-empty">아직 댓글이 없습니다</div>'}</div>
+        <div class="fc-comment-compose">
+          <input id="cinput_${p.id}" type="text" maxlength="300" placeholder="댓글을 입력하세요"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();App.submitComment('${p.id}')}">
+          <button type="button" class="btn sm" onclick="App.submitComment('${p.id}')">등록</button>
+        </div>
+      </div>
     </div>`;
+  },
+
+  commentRowHtml(c) {
+    if (!c || !c.id) return '';
+    const t = c.created_at ? new Date(c.created_at) : null;
+    const time = t
+      ? `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+      : '';
+    const isMine = !!(Store.user && c.user_id && Store.user.id === c.user_id);
+    const del = isMine
+      ? `<button type="button" class="fc-cdel" onclick="App.deleteComment('${c.id}','${c.post_id}')">삭제</button>`
+      : '';
+    return `<div class="fc-comment" id="comment_${c.id}">
+      <div class="fc-cmeta">
+        <span class="fc-cname">${esc(c.author_name || '익명')}</span>
+        <span class="fc-ctime">${esc(time)}</span>
+        ${del}
+      </div>
+      <div class="fc-cbody">${esc(c.body)}</div>
+    </div>`;
+  },
+
+  async submitComment(postId) {
+    if (!Store.user) { toast('로그인이 필요합니다'); return; }
+    const input = el('cinput_' + postId);
+    const body = input ? input.value : '';
+    try {
+      const row = await Store.addComment(postId, body);
+      if (input) input.value = '';
+      const post = (this.communityPosts || []).find(p => p.id === postId);
+      if (post) {
+        if (!Array.isArray(post.comments)) post.comments = [];
+        post.comments.push(row);
+      }
+      const list = el('clist_' + postId);
+      if (list) {
+        const empty = list.querySelector('.fc-comment-empty');
+        if (empty) empty.remove();
+        list.insertAdjacentHTML('beforeend', this.commentRowHtml(row));
+      }
+      const label = document.querySelector(`#comments_${postId} .fc-comments-label`);
+      if (label && post) label.textContent = `댓글 ${post.comments.length}`;
+      toast('댓글이 등록되었습니다');
+    } catch (e) {
+      toast(e.message || '댓글 등록 실패');
+    }
+  },
+
+  async deleteComment(commentId, postId) {
+    if (!Store.user) { toast('로그인이 필요합니다'); return; }
+    if (!confirm('이 댓글을 삭제할까요?')) return;
+    try {
+      await Store.deleteComment(commentId);
+      const post = (this.communityPosts || []).find(p => p.id === postId);
+      if (post && Array.isArray(post.comments)) {
+        post.comments = post.comments.filter(c => c.id !== commentId);
+      }
+      const node = el('comment_' + commentId);
+      if (node) node.remove();
+      const list = el('clist_' + postId);
+      if (list && post && !post.comments.length) {
+        list.innerHTML = '<div class="fc-comment-empty">아직 댓글이 없습니다</div>';
+      }
+      const label = document.querySelector(`#comments_${postId} .fc-comments-label`);
+      if (label && post) label.textContent = `댓글 ${post.comments.length}`;
+      toast('댓글이 삭제되었습니다');
+    } catch (e) {
+      toast(e.message || '댓글 삭제 실패');
+    }
   },
 
   async deleteCommunityPost(postId) {
@@ -1054,7 +1135,11 @@ const App = {
       else this.paintCommunityFeed(this.communityPosts);
       toast('삭제되었습니다');
     } catch (e) {
+      console.error('[community delete]', e);
+      alert(e.message || '삭제 실패');
       toast(e.message || '삭제 실패');
+      /* 실패 시 서버 기준으로 피드 다시 맞춤 */
+      try { await this.renderCommunity(true); } catch (err) { /* ignore */ }
     }
   },
 

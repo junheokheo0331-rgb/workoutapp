@@ -41,6 +41,7 @@ const CFG = {
   TABLE_LOGS: 'workout_logs',
   TABLE_POSTS: 'community_posts',
   TABLE_REACTIONS: 'post_reactions',
+  TABLE_COMMENTS: 'post_comments',
   MIN_PASSWORD: 6,
   REACTIONS: [
     { key: 'like', emoji: '👍', label: '좋아요' },

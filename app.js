@@ -44,6 +44,7 @@ const App = {
   _aiTargets: ['chest', 'back'],
   _aiLevel: 'intermediate',
   _aiStyle: 'bodybuilding',
+  _aiDuration: '30',
   viewMonday: (function () {
     const d = new Date(); const off = (d.getDay() + 6) % 7;
     d.setDate(d.getDate() - off); d.setHours(0, 0, 0, 0); return d;
@@ -1114,6 +1115,7 @@ const App = {
     }
     this._aiLevel = this._aiLevel || 'intermediate';
     this._aiStyle = this._aiStyle || 'bodybuilding';
+    this._aiDuration = this._aiDuration || '30';
 
     const targetOpts = [
       ['chest', '가슴'], ['back', '등'], ['shoulders', '어깨'],
@@ -1129,6 +1131,9 @@ const App = {
       ['bodybuilding', '보디빌딩 (근비대/펌핑)'],
       ['conditioning', '컨디셔닝 (기능성/다이어트)']
     ];
+    const durationOpts = [
+      ['15', '15분'], ['30', '30분'], ['45', '45분'], ['60', '1시간']
+    ];
 
     const multiChips = targetOpts.map(([k, lbl]) =>
       `<button type="button" class="ai-chip multi ${this._aiTargets.includes(k) ? 'on' : ''}"
@@ -1140,7 +1145,7 @@ const App = {
     ).join('');
 
     modal('AI 루틴 생성', `
-      <div class="muted">부위·숙련도·스타일을 고르면 성별 · SBD e1RM · 근육 회복도를 반영해 루틴을 만듭니다.</div>
+      <div class="muted">부위·숙련도·스타일·희망 시간을 고르면 성별 · SBD e1RM · 근육 회복도를 반영해 루틴을 만듭니다.</div>
 
       <div class="ai-sec-label">1. 타겟 부위</div>
       <div class="ai-sec-hint">여러 개 선택 가능 · 다시 누르면 해제</div>
@@ -1151,6 +1156,10 @@ const App = {
 
       <div class="ai-sec-label">3. 트레이닝 스타일</div>
       <div class="ai-opt" id="aiStyleChips">${singleChips(styleOpts, 'style', this._aiStyle)}</div>
+
+      <div class="ai-sec-label">4. 희망 운동 시간</div>
+      <div class="ai-sec-hint">선택한 시간 안에 끝나도록 종목·세트·휴식을 맞춥니다</div>
+      <div class="ai-opt" id="aiDurationChips">${singleChips(durationOpts, 'duration', this._aiDuration)}</div>
 
       <div class="ai-status" id="aiStatus"></div>
       <div class="btnrow">
@@ -1174,7 +1183,11 @@ const App = {
   pickAiOption(group, value) {
     if (group === 'level') this._aiLevel = value;
     else if (group === 'style') this._aiStyle = value;
-    const wrap = el(group === 'level' ? 'aiLevelChips' : 'aiStyleChips');
+    else if (group === 'duration') this._aiDuration = value;
+    const wrapId = group === 'level' ? 'aiLevelChips'
+      : group === 'style' ? 'aiStyleChips'
+      : group === 'duration' ? 'aiDurationChips' : null;
+    const wrap = wrapId ? el(wrapId) : null;
     if (!wrap) return;
     wrap.querySelectorAll('.ai-chip').forEach(b => {
       b.classList.toggle('on', b.dataset.v === value);
@@ -1189,7 +1202,9 @@ const App = {
     }
     const level = this._aiLevel || 'intermediate';
     const style = this._aiStyle || 'bodybuilding';
-    return { targets, level, style };
+    const duration = this._aiDuration || '30';
+    const durationLabel = ({ '15': '15분', '30': '30분', '45': '45분', '60': '1시간' })[duration] || (duration + '분');
+    return { targets, level, style, duration, durationLabel };
   },
 
   async runAiRoutine() {

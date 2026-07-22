@@ -12,6 +12,25 @@
 const SUPABASE_URL = 'https://ieuluoovykntxzmgstsy.supabase.co';        // 예: 'https://abcdefgh.supabase.co'
 const SUPABASE_ANON_KEY = 'sb_publishable_Gb3jT9pk8zIGUG0alhBZ0g_JvSTL6Mp';   // 예: 'eyJhbGciOi...'
 
+/* ── Gemini (AI 루틴) ─────────────────────────────────────────
+   Google AI Studio AQ. auth key.
+   인증은 URL ?key= 가 아니라 요청 헤더 x-goog-api-key 로 전달한다.
+------------------------------------------------------------ */
+const CONFIG = {
+  /* 로컬에서만 키를 넣고 커밋하지 마세요. GitHub Push Protection이 차단합니다. */
+  GEMINI_API_KEY: '',
+  /* 2.0/2.5 Flash는 신규 계정·종료 모델이라 404 남 → 3.x 사용 */
+  GEMINI_MODEL: 'gemini-3.1-flash-lite',
+  GEMINI_FALLBACK_MODELS: ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash'],
+  GEMINI_MAX_RETRIES: 3,
+  GEMINI_RETRY_BASE_MS: 3000,
+  GEMINI_COOLDOWN_MS: 12000
+};
+
+/* 하위 호환 별칭 */
+const GEMINI_API_KEY = CONFIG.GEMINI_API_KEY;
+const GEMINI_MODEL = CONFIG.GEMINI_MODEL;
+
 /* ── 상수 ──────────────────────────────────────────────────── */
 const CFG = {
   STORAGE_KEY: 'autoreg.v6',
@@ -20,8 +39,21 @@ const CFG = {
   SYNC_DEBOUNCE_MS: 1500,       // 입력이 멈춘 뒤 이 시간 후 클라우드 반영
   TABLE_STATE: 'user_state',
   TABLE_LOGS: 'workout_logs',
-  MIN_PASSWORD: 6
+  TABLE_POSTS: 'community_posts',
+  TABLE_REACTIONS: 'post_reactions',
+  MIN_PASSWORD: 6,
+  REACTIONS: [
+    { key: 'like', emoji: '👍', label: '좋아요' },
+    { key: 'sad', emoji: '😢', label: '슬퍼요' },
+    { key: 'fire', emoji: '🔥', label: '최고야' },
+    { key: 'cheer', emoji: '🙌', label: '응원해' },
+    { key: 'respect', emoji: '💪', label: '리스펙' }
+  ]
 };
+
+function geminiEnabled() {
+  return !!(CONFIG.GEMINI_API_KEY && String(CONFIG.GEMINI_API_KEY).trim());
+}
 
 /* ── Supabase 클라이언트 (없으면 null) ───────────────────────── */
 let sb = null;

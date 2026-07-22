@@ -81,3 +81,59 @@ create policy workout_logs_delete on public.workout_logs
 --    Authentication → Providers → Email
 --      · "Confirm email"  OFF
 --      · "Enable email provider" ON
+
+-- ============================================================
+--  커뮤니티 피드 (community_posts + post_reactions)
+-- ============================================================
+
+create table if not exists public.community_posts (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid        not null references auth.users(id) on delete cascade,
+  author_name  text        not null default '익명',
+  body         text        not null,
+  post_type    text        not null default 'free'
+               check (post_type in ('free', 'workout_complete')),
+  volume_kg    numeric,
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists community_posts_created_idx
+  on public.community_posts (created_at desc);
+
+create table if not exists public.post_reactions (
+  id             uuid primary key default gen_random_uuid(),
+  post_id        uuid        not null references public.community_posts(id) on delete cascade,
+  user_id        uuid        not null references auth.users(id) on delete cascade,
+  reaction_type  text        not null
+                 check (reaction_type in ('like','sad','fire','cheer','respect')),
+  created_at     timestamptz not null default now(),
+  unique (post_id, user_id, reaction_type)
+);
+
+create index if not exists post_reactions_post_idx
+  on public.post_reactions (post_id);
+
+alter table public.community_posts enable row level security;
+alter table public.post_reactions enable row level security;
+
+drop policy if exists community_posts_select on public.community_posts;
+drop policy if exists community_posts_insert on public.community_posts;
+drop policy if exists community_posts_delete on public.community_posts;
+
+create policy community_posts_select on public.community_posts
+  for select to authenticated using (true);
+create policy community_posts_insert on public.community_posts
+  for insert to authenticated with check (auth.uid() = user_id);
+create policy community_posts_delete on public.community_posts
+  for delete to authenticated using (auth.uid() = user_id);
+
+drop policy if exists post_reactions_select on public.post_reactions;
+drop policy if exists post_reactions_insert on public.post_reactions;
+drop policy if exists post_reactions_delete on public.post_reactions;
+
+create policy post_reactions_select on public.post_reactions
+  for select to authenticated using (true);
+create policy post_reactions_insert on public.post_reactions
+  for insert to authenticated with check (auth.uid() = user_id);
+create policy post_reactions_delete on public.post_reactions
+  for delete to authenticated using (auth.uid() = user_id);

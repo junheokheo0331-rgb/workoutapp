@@ -36,8 +36,14 @@ const DAY_HINT_KO = { mon: '월', tue: '화', wed: '수', thu: '목', fri: '금'
    ============================================================ */
 const App = {
   tab: 'home',
-  cur: null,            // { date, programId }
+  cur: null,            // { date, programId, sessionId }
   editProgramId: null,
+  bodySide: 'front',    // analyze 탭 전면/후면
+  _initGender: 'male',
+  communityPosts: [],
+  _aiTargets: ['chest', 'back'],
+  _aiLevel: 'intermediate',
+  _aiStyle: 'bodybuilding',
   viewMonday: (function () {
     const d = new Date(); const off = (d.getDay() + 6) % 7;
     d.setDate(d.getDate() - off); d.setHours(0, 0, 0, 0); return d;
@@ -65,20 +71,56 @@ const App = {
     }
     Store.paint();
     this.go('home');
-    this.showSplash();
+
+    /* 재방문 유저: 스플래시·초기세팅을 건너뛰고 바로 홈 */
+    if (this.hasCompletedSetup()) {
+      if (Store.s.settings.isFirstRun) {
+        Store.s.settings.isFirstRun = false;
+        Store.save();
+      }
+      this.hideSplash(true);
+    } else {
+      this.showSplash();
+    }
   },
 
   /* ---------- 스플래시 · 최초 세팅 ---------- */
+  /** 초기 세팅을 마쳤거나, 의미 있는 세팅/기록이 이미 있으면 true */
+  hasCompletedSetup() {
+    const st = Store.s && Store.s.settings;
+    if (!st) return false;
+    if (st.isFirstRun === false) return true;
+    if (st.age != null && st.age !== '') return true;
+    const b = st.baseline || {};
+    if (Object.keys(b).some(k => b[k] && +b[k].w > 0)) return true;
+    if (Store.s.logs && Object.keys(Store.s.logs).length > 0) return true;
+    return false;
+  },
   showSplash() {
+    const splash = el('splashScreen');
+    if (splash) {
+      splash.classList.remove('hide', 'hide-splash');
+      splash.style.display = '';
+    }
     const btn = el('splashBtn');
     if (btn) btn.style.display = 'inline-block';
   },
-  startFromSplash() {
+  hideSplash(immediate) {
     const splash = el('splashScreen');
-    if (splash) splash.classList.add('hide-splash');
+    if (!splash) return;
+    if (immediate) {
+      splash.classList.add('hide');
+      splash.classList.remove('hide-splash');
+    } else {
+      splash.classList.add('hide-splash');
+      setTimeout(() => splash.classList.add('hide'), 400);
+    }
+  },
+  startFromSplash() {
+    this.hideSplash(false);
     setTimeout(() => {
       if (cloudEnabled() && !Store.user) this.showAuth();
-      else if (Store.s.settings.isFirstRun) this.showInitialSetup();
+      else if (!this.hasCompletedSetup()) this.showInitialSetup();
     }, 400);
   },
 
@@ -121,7 +163,7 @@ const App = {
       toast(`${name}님 환영합니다`);
       await Store.syncNow();
       Store.paint();
-      if (Store.s.settings.isFirstRun) this.showInitialSetup();
+      if (!this.hasCompletedSetup()) this.showInitialSetup();
       this.render();
     } catch (e) {
       msg.style.color = 'var(--bad)';
@@ -135,7 +177,7 @@ const App = {
   useLocalOnly() {
     closeModal();
     Store.syncState = 'local'; Store.paint();
-    if (Store.s.settings.isFirstRun) this.showInitialSetup();
+    if (!this.hasCompletedSetup()) this.showInitialSetup();
   },
 
   async doSignOut() {
@@ -146,10 +188,19 @@ const App = {
   },
 
   showInitialSetup() {
+    this._initGender = (Store.s.settings.gender === 'female') ? 'female' : 'male';
     const html = `
       <div class="tiny" style="margin-bottom:12px">
         3대 운동 기준 기록은 <b>자동 처방의 출발점</b>입니다. 여기가 비어 있으면 목표 중량이 계산되지 않습니다.
         1RM을 모르면 최근에 확실히 성공한 무게를 넣어도 됩니다(이후 세션 기록으로 자동 보정됩니다).
+      </div>
+      <div class="field"><label>성별 (해부도)</label>
+        <div class="gender-toggle">
+          <button type="button" class="gt ${this._initGender === 'male' ? 'on' : ''}" id="initGenderMale"
+            onclick="App.pickInitGender('male')">남성</button>
+          <button type="button" class="gt ${this._initGender === 'female' ? 'on' : ''}" id="initGenderFemale"
+            onclick="App.pickInitGender('female')">여성</button>
+        </div>
       </div>
       <div class="grid2">
         <div class="field"><label>나이 (심박존 계산용)</label><input id="initAge" type="number" placeholder="예: 24"></div>
@@ -168,8 +219,16 @@ const App = {
     modal('초기 세팅', html);
   },
 
+  pickInitGender(g) {
+    this._initGender = g === 'female' ? 'female' : 'male';
+    const m = el('initGenderMale'), f = el('initGenderFemale');
+    if (m) m.classList.toggle('on', this._initGender === 'male');
+    if (f) f.classList.toggle('on', this._initGender === 'female');
+  },
+
   saveInitialSetup() {
     const st = Store.s.settings;
+    st.gender = this._initGender === 'female' ? 'female' : 'male';
     st.age = +el('initAge').value || null;
     st.unit = el('initUnit').value || 'kg';
     st.unitBar = +el('initUnitBar').value || 10;
@@ -183,22 +242,44 @@ const App = {
 
   restore() {
     const s = Store.s;
-    if (s.session && s.session.date === getTodayStr()) {
-      this.cur = { date: s.session.date, programId: s.session.programId };
-    } else s.session = null;
+    if (s.session && s.session.date === getTodayStr() && s.session.sessionId) {
+      const sess = getSession(s.session.date, s.session.sessionId);
+      if (sess && !sess.endedAt) {
+        this.cur = {
+          date: s.session.date,
+          programId: sess.programId || s.session.programId,
+          sessionId: s.session.sessionId
+        };
+        return;
+      }
+    }
+    s.session = null;
+    this.cur = null;
   },
 
   /* ---------- 라우팅 ---------- */
   go(tab) {
+    /* program/stats 레거시 → 통합 탭으로 리다이렉트 */
+    if (tab === 'program') tab = 'home';
+    if (tab === 'stats') tab = 'analyze';
     this.tab = tab;
-    ['home', 'workout', 'program', 'stats', 'settings'].forEach(t => {
+    ['home', 'workout', 'analyze', 'community', 'settings'].forEach(t => {
       const n = el('view' + t[0].toUpperCase() + t.slice(1));
       if (n) n.classList.toggle('hide', t !== tab);
     });
-    document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+    document.querySelectorAll('nav.tabs button').forEach(b => {
+      const key = b.dataset.tab;
+      b.classList.toggle('on', key === tab || (tab === 'workout' && key === 'home'));
+    });
     el('hAction').textContent = tab === 'workout' ? '세션 종료' : '설정';
-    const T = { home: '오늘의 훈련', workout: '운동 중', program: '루틴 편집', stats: '기록', settings: '설정' };
-    el('hTitle').textContent = T[tab];
+    const T = {
+      home: '오늘의 훈련',
+      workout: '운동 중',
+      analyze: '분석 · 기록',
+      community: '커뮤니티',
+      settings: '설정'
+    };
+    el('hTitle').textContent = T[tab] || 'Autoreg';
     this.render();
     window.scrollTo(0, 0);
   },
@@ -206,8 +287,8 @@ const App = {
   render() {
     if (this.tab === 'home') this.renderHome();
     else if (this.tab === 'workout') this.renderWorkout();
-    else if (this.tab === 'program') this.renderProgram();
-    else if (this.tab === 'stats') this.renderStats();
+    else if (this.tab === 'analyze') this.renderAnalyze();
+    else if (this.tab === 'community') this.renderCommunity();
     else this.renderSettings();
     this.renderRest();
     Store.paint();
@@ -220,32 +301,12 @@ const App = {
     el('hSub').textContent =
       `${today.getFullYear()}년 ${today.getMonth() + 1}월 ${today.getDate()}일 (${WD[today.getDay()]})`;
 
-    /* 월간 캘린더 */
-    const year = today.getFullYear(), month = today.getMonth();
-    const firstDay = new Date(year, month, 1).getDay();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    let monthHtml = `<div class="card"><h2>${month + 1}월 <span class="tiny">날짜를 누르면 그날 기록</span></h2><div class="monthly-cal">`;
-    for (let i = 0; i < firstDay; i++) monthHtml += '<div></div>';
-    for (let d = 1; d <= daysInMonth; d++) {
-      const iter = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      monthHtml += `<div class="m-day ${d === today.getDate() ? 'today' : ''} ${dayDone(iter) > 0 ? 'done' : ''}"
-        onclick="App.openHistoryViewer('${iter}')">${d}</div>`;
-    }
-    monthHtml += '</div></div>';
-
-    /* 주간 바 */
-    let weekCal = '';
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(this.viewMonday); d.setDate(this.viewMonday.getDate() + i);
-      const iter = dateStrOf(d);
-      const done = dayDone(iter);
-      weekCal += `<div class="daycell ${iter === todayStr ? 'today' : ''} ${done ? 'done' : ''}"
-        onclick="App.openHistoryViewer('${iter}')">
-        <div class="dw">${WD[d.getDay()]}</div><div class="dd">${d.getDate()}</div>
-        <div class="tag">${done ? done + '세트' : ''}</div></div>`;
+    if (this.editProgramId) {
+      el('hSub').textContent = '루틴 편집';
+      el('viewHome').innerHTML = this.buildProgramDetailHtml(this.editProgramId);
+      return;
     }
 
-    /* 오늘 추천 루틴 (dayHint 기준) */
     const hintKey = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][today.getDay()];
     const recommended = Store.s.programs.find(p => p.dayHint === hintKey);
 
@@ -267,21 +328,16 @@ const App = {
       </div>`;
     });
 
-    let html = monthHtml + `
+    let html = `
       <div class="card">
-        <div class="weeknav">
-          <button class="navb" onclick="App.shiftWeek(-1)">‹ 이전 주</button>
-          <b>${fmtDate(this.viewMonday)} 주간</b>
-          <button class="navb" onclick="App.shiftWeek(1)">다음 주 ›</button>
-        </div>
-        <div class="weekbar">${weekCal}</div>
-      </div>
-      <div class="card">
-        <h2>수행할 루틴 선택</h2>
+        <h2>나의 루틴</h2>
         <div class="muted" style="margin-bottom:12px">
-          루틴을 고르면 각 운동의 <b>지난 기록</b>과 <b>이번 목표</b>가 자동으로 계산되어 표시됩니다.</div>
-        ${routines}
-        <button class="btn ghost sm" style="margin-top:8px" onclick="App.go('program')">＋ 새 루틴 만들기</button>
+          루틴을 고르면 지난 기록과 이번 목표가 자동 계산됩니다.</div>
+        ${routines || '<div class="emptybox">루틴이 없습니다. 루틴 관리에서 만들어 주세요.</div>'}
+        <div style="height:10px"></div>
+        <button class="btn" onclick="App.openAiRoutineModal()">✨ AI 루틴 생성</button>
+        <div style="height:8px"></div>
+        <button class="btn" onclick="App.openRoutineManageModal()">⚙️ 루틴 관리</button>
       </div>`;
 
     if (this.cur && this.cur.date === todayStr) {
@@ -294,89 +350,239 @@ const App = {
     el('viewHome').innerHTML = html;
   },
 
+  buildRoutineManageInner() {
+    let manage = '';
+    Store.s.programs.forEach(p => {
+      manage += `<div class="exitem">
+        <div class="g"><div class="n">${esc(p.title)}</div>
+          <div class="m">${p.items.length}개 운동${p.dayHint ? ' · ' + DAY_HINT_KO[p.dayHint] + '요일' : ''}</div></div>
+        <button class="iconb" onclick="event.stopPropagation();App.openProgramDetail('${p.id}')" title="편집">✎</button>
+        <button class="iconb" onclick="event.stopPropagation();App.renameProgram('${p.id}')" title="이름">Aa</button>
+        <button class="iconb del" onclick="event.stopPropagation();App.deleteProgram('${p.id}')" title="삭제">✕</button>
+      </div>`;
+    });
+    return `
+      <div class="muted" style="margin-bottom:10px">프리셋 수정 · 커스텀 루틴 추가</div>
+      ${manage || '<div class="emptybox">루틴이 없습니다</div>'}
+      <div style="height:10px"></div>
+      <button class="btn" onclick="App.createProgram()">＋ 새 루틴 만들기</button>
+      <div style="height:8px"></div>
+      <button class="btn danger sm" onclick="App.resetProgram()">기본 2분할 루틴으로 복원</button>`;
+  },
+
+  openRoutineManageModal() {
+    const m = modal('⚙️ 루틴 관리', `
+      <div id="routineManageBody">${this.buildRoutineManageInner()}</div>
+      <button class="btn ghost sm" style="margin-top:14px" onclick="App.closeRoutineManage()">닫기</button>`);
+    const sheet = m && m.querySelector('.sheet');
+    if (sheet) sheet.classList.add('manage-sheet');
+  },
+
+  closeRoutineManage() {
+    closeModal();
+    if (this.tab === 'home' && !this.editProgramId) this.renderHome();
+  },
+
+  /** 관리 모달이 열려 있으면 내용만 갱신 + 홈 리스트 동기화 */
+  syncHomeAfterRoutineEdit() {
+    const body = el('routineManageBody');
+    if (body) body.innerHTML = this.buildRoutineManageInner();
+    if (this.tab === 'home' && !this.editProgramId) this.renderHome();
+  },
+
+  buildCalendarBlock(todayStr) {
+    const today = new Date();
+    const year = today.getFullYear(), month = today.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    let monthHtml = `<div class="card"><h2>${month + 1}월 <span class="tiny">날짜 → 세션 기록</span></h2><div class="monthly-cal">`;
+    for (let i = 0; i < firstDay; i++) monthHtml += '<div></div>';
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iter = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const sc = daySessionCount(iter);
+      monthHtml += `<div class="m-day ${d === today.getDate() ? 'today' : ''} ${sc > 0 ? 'done' : ''}"
+        onclick="App.openHistoryViewer('${iter}')">${d}${calDotsHtml(sc)}</div>`;
+    }
+    monthHtml += '</div></div>';
+
+    let weekCal = '';
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(this.viewMonday); d.setDate(this.viewMonday.getDate() + i);
+      const iter = dateStrOf(d);
+      const sc = daySessionCount(iter);
+      const done = dayDone(iter);
+      weekCal += `<div class="daycell ${iter === todayStr ? 'today' : ''} ${sc ? 'done' : ''}"
+        onclick="App.openHistoryViewer('${iter}')">
+        <div class="dw">${WD[d.getDay()]}</div><div class="dd">${d.getDate()}</div>
+        ${calDotsHtml(sc, iter === todayStr)}
+        <div class="tag">${done ? done + '세트' : ''}</div></div>`;
+    }
+    return monthHtml + `
+      <div class="card">
+        <div class="weeknav">
+          <button class="navb" onclick="App.shiftWeek(-1)">‹ 이전 주</button>
+          <b>${fmtDate(this.viewMonday)} 주간</b>
+          <button class="navb" onclick="App.shiftWeek(1)">다음 주 ›</button>
+        </div>
+        <div class="weekbar">${weekCal}</div>
+      </div>`;
+  },
+
   shiftWeek(n) {
     this.viewMonday = new Date(this.viewMonday.getTime() + n * 7 * 86400000);
     this.render();
   },
 
   openHistoryViewer(dateStr) {
-    const log = getLog(dateStr, false);
+    const sessions = getSessions(dateStr).filter(s => sessionDoneSets(s) > 0 || s.endedAt);
     const u = Store.s.settings.unit || 'kg';
-    if (!log || dayDone(dateStr) === 0) {
+    if (!sessions.length) {
       const isFuture = dateStr > getTodayStr();
       modal(dateStr, `<div class="emptybox">${isFuture ? '아직 오지 않은 날입니다.' : '이 날은 기록이 없습니다.'}</div>
         ${isFuture ? '' : `<button class="btn" onclick="App.startOnDate('${dateStr}')">이 날짜로 세션 기록하기</button>`}
         <button class="btn ghost sm" style="margin-top:8px" onclick="closeModal()">닫기</button>`);
       return;
     }
-    const p = Store.s.programs.find(x => x.id === log.programId);
-    let rows = '';
-    Object.entries(log.sets).forEach(([exId, arr]) => {
-      const e = findExById(exId);
-      const done = (arr || []).filter(s => s && s.done);
-      if (!done.length) return;
-      const detail = done.map(s => `${+s.w}${u}×${+s.reps}` + (s.rir != null ? `(R${+s.rir})` : '')).join(', ');
-      rows += `<tr><td style="text-align:left">${esc(e ? e.name : '(삭제된 운동)')}</td>
-        <td style="text-align:left">${esc(detail)}</td></tr>`;
-    });
-    const vol = Object.values(log.sets).flat()
-      .filter(s => s && s.done).reduce((a, s) => a + (+s.w || 0) * (+s.reps || 0), 0);
-    modal(`${dateStr} 기록`, `
-      <div class="muted" style="margin-bottom:8px">
-        ${esc(p ? p.title : '루틴 미지정')} · ${dayDone(dateStr)}세트 · 총 볼륨 ${Math.round(vol).toLocaleString()}${u}</div>
-      <table class="hist"><tbody>${rows}</tbody></table>
-      <button class="btn ghost sm" style="margin-top:12px" onclick="App.startOnDate('${dateStr}')">이 날짜 이어서 기록</button>
+
+    let cards = '';
+    sessions
+      .slice()
+      .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0))
+      .forEach((sess, i) => {
+        const p = Store.s.programs.find(x => x.id === sess.programId);
+        let rows = '';
+        Object.entries(sess.sets || {}).forEach(([exId, arr]) => {
+          const e = findExById(exId);
+          const done = (arr || []).filter(s => s && s.done);
+          if (!done.length) return;
+          const detail = done.map(s => `${+s.w}${u}×${+s.reps}` + (s.rir != null ? `(R${+s.rir})` : '')).join(', ');
+          rows += `<tr><td style="text-align:left">${esc(e ? e.name : '(삭제된 운동)')}</td>
+            <td style="text-align:left">${esc(detail)}</td></tr>`;
+        });
+        const vol = sessionVolume(sess);
+        const n = sessionDoneSets(sess);
+        const t0 = sess.startedAt ? new Date(sess.startedAt) : null;
+        const timeLbl = t0
+          ? `${String(t0.getHours()).padStart(2, '0')}:${String(t0.getMinutes()).padStart(2, '0')}`
+          : `세션 ${i + 1}`;
+        cards += `<div class="hist-sess">
+          <button class="hist-del" title="세션 삭제"
+            onclick="event.stopPropagation();App.deleteSessionFromHistory('${dateStr}','${sess.id}')">🗑</button>
+          <div class="hs-top">
+            <div>
+              <div class="hs-title">${esc(p ? p.title : '루틴 미지정')}</div>
+              <div class="hs-meta">${timeLbl} · ${n}세트 · ${Math.round(vol).toLocaleString()}${u}</div>
+            </div>
+          </div>
+          <table class="hist"><tbody>${rows || '<tr><td colspan="2" class="tiny">상세 세트 없음</td></tr>'}</tbody></table>
+        </div>`;
+      });
+
+    modal(`${dateStr} 기록 · ${sessions.length}회`, `
+      <div id="histSessionList">${cards}</div>
+      <button class="btn" style="margin-top:4px" onclick="App.startOnDate('${dateStr}')">이 날짜에 새 세션 추가</button>
       <button class="btn ghost sm" style="margin-top:8px" onclick="closeModal()">닫기</button>`);
+  },
+
+  deleteSessionFromHistory(dateStr, sessionId) {
+    if (!confirm('이 세션 기록을 삭제할까요?')) return;
+    const ok = Store.deleteWorkoutSession(dateStr, sessionId);
+    if (!ok) { toast('삭제에 실패했습니다'); return; }
+    if (this.cur && this.cur.sessionId === sessionId) {
+      this.cur = null;
+      this.releaseWakeLock();
+    }
+    toast('세션이 삭제되었습니다');
+    closeModal();
+    if (daySessionCount(dateStr) > 0) this.openHistoryViewer(dateStr);
+    this.render();
   },
 
   startOnDate(dateStr) {
     closeModal();
-    const log = getLog(dateStr, false);
-    const pid = (log && log.programId) || (Store.s.programs[0] && Store.s.programs[0].id);
+    const sessions = getSessions(dateStr);
+    const last = sessions.length ? sessions[sessions.length - 1] : null;
+    const pid = (last && last.programId) || (Store.s.programs[0] && Store.s.programs[0].id);
     if (!pid) { toast('루틴이 없습니다'); return; }
     this.startSession(dateStr, pid);
   },
 
   /* ---------- 세션 ---------- */
-  startSession(dateStr, programId) {
-    this.cur = { date: dateStr, programId };
-    const log = getLog(dateStr, true);
-    if (!log.startedAt) log.startedAt = Date.now();
-    log.programId = programId;
-    Store.s.session = { date: dateStr, programId };
+  startSession(dateStr, programId, opts) {
+    const skip = opts && opts.skipConfirm;
+    if (!skip && !confirm('운동을 시작하시겠습니까?')) return;
+    const sessionId = newSessionId();
+    const day = getDayLog(dateStr, true);
+    day.sessions.push({
+      id: sessionId, programId, startedAt: Date.now(), endedAt: null, sets: {}
+    });
+    this.cur = { date: dateStr, programId, sessionId };
+    Store.s.session = { date: dateStr, programId, sessionId };
     Store.save(dateStr);
     this.requestWakeLock();
     this.go('workout');
   },
 
-  finishSession() {
-    if (!this.cur) { this.go('home'); return; }
-    const { date } = this.cur;
-    const log = getLog(date, true);
-    log.endedAt = Date.now();
+  /** 기록 저장 없이 오늘 세션 폐기 후 홈 복귀 */
+  cancelSession() {
+    if (!this.cur || !this.cur.sessionId) {
+      this.go('home');
+      return;
+    }
+    if (!confirm('현재까지의 운동 기록이 저장되지 않습니다. 운동을 취소하시겠습니까?')) return;
+    const { date, sessionId } = this.cur;
+    try { this.restStop(); } catch (e) { /* ignore */ }
+    Store.s.timer = null;
+    Store.deleteWorkoutSession(date, sessionId);
     Store.s.session = null;
-    Store.save(date);
-    this.releaseWakeLock();
-    toast(`세션 종료 · ${dayDone(date)}세트 기록`);
     this.cur = null;
+    this.releaseWakeLock();
+    toast('운동이 취소되었습니다');
     this.go('home');
   },
 
+  finishSession() {
+    if (!this.cur) { this.go('home'); return; }
+    const { date, sessionId } = this.cur;
+    const sess = getSession(date, sessionId, true);
+    sess.endedAt = Date.now();
+    const vol = sessionVolume(sess);
+    const doneN = sessionDoneSets(sess);
+    Store.s.session = null;
+    Store.save(date);
+    this.releaseWakeLock();
+    toast(`세션 종료 · ${doneN}세트 기록`);
+    this.cur = null;
+    if (doneN > 0) {
+      Store.postWorkoutComplete(vol).then(p => {
+        if (p && this.tab === 'community') this.renderCommunity(true);
+      });
+    }
+    this.go('home');
+  },
+
+  activeSession() {
+    if (!this.cur || !this.cur.sessionId) return null;
+    return getSession(this.cur.date, this.cur.sessionId, true);
+  },
+
   renderWorkout() {
-    if (!this.cur) {
+    if (!this.cur || !this.cur.sessionId) {
       el('viewWorkout').innerHTML = `<div class="card"><div class="emptybox">진행 중인 세션이 없습니다.</div>
         <button class="btn" onclick="App.go('home')">홈으로</button></div>`;
       return;
     }
-    const { date, programId } = this.cur;
+    const { date, programId, sessionId } = this.cur;
     const prog = Store.s.programs.find(x => x.id === programId);
     if (!prog) return this.go('home');
 
-    const log = getLog(date, true);
-    const total = progTotalSets(programId), done = dayDone(date);
+    const log = getSession(date, sessionId, true);
+    const beforeTs = log.startedAt || Date.now();
+    const total = progTotalSets(programId), done = sessionDoneSets(log);
     const elapsed = log.startedAt ? (Date.now() - log.startedAt) / 1000 : 0;
     const u = Store.s.settings.unit || 'kg';
-    el('hSub').textContent = `${esc(prog.title)} · ${date}`;
+    const sessN = getSessions(date).length;
+    el('hSub').textContent = `${esc(prog.title)} · ${date}` + (sessN > 1 ? ` · #${sessN}` : '');
 
     let html = `${CardioEngine.renderDashboard()}
       <div class="sessbar">
@@ -386,10 +592,10 @@ const App = {
       </div>`;
 
     prog.items.forEach((e, ei) => {
-      const tg = Engine.targets(e, date);
+      const tg = Engine.targets(e, date, beforeTs);
       const rec = log.sets[e.id] || [];
-      const prev = Engine.prevRecord(e.id, date);
-      const prevLine = Engine.prevText(e.id, date, u);
+      const prev = Engine.prevRecord(e.id, date, beforeTs);
+      const prevLine = Engine.prevText(e.id, date, u, beforeTs);
 
       let rows = '';
       if (e.type === 'cardio') {
@@ -454,23 +660,28 @@ const App = {
     html += `<div class="card">
       <button class="btn ghost" style="margin-bottom:12px" onclick="App.addExercise('${programId}')">➕ 이 루틴에 운동 추가</button>
       <button class="btn" onclick="App.finishSession()">세션 저장 및 종료</button>
+      <div style="height:8px"></div>
+      <button class="btn danger sm" onclick="App.cancelSession()">운동 취소</button>
     </div>`;
     el('viewWorkout').innerHTML = html;
   },
 
   setVal(exId, idx, field, val) {
-    const { date } = this.cur;
-    const log = getLog(date, true);
+    if (!this.cur) return;
+    const log = this.activeSession();
+    if (!log) return;
     if (!log.sets[exId]) log.sets[exId] = [];
     while (log.sets[exId].length <= idx) log.sets[exId].push({});
     log.sets[exId][idx][field] = val === '' ? null : +val;
-    Store.save(date);
+    Store.save(this.cur.date);
   },
 
   toggleSet(exId, idx) {
+    if (!this.cur) return;
     const { date } = this.cur;
     const e = findExById(exId);
-    const log = getLog(date, true);
+    const log = this.activeSession();
+    if (!log) return;
     if (!log.sets[exId]) log.sets[exId] = [];
     while (log.sets[exId].length <= idx) log.sets[exId].push({});
     const s = log.sets[exId][idx];
@@ -480,7 +691,7 @@ const App = {
       s.done = true; s.at = Date.now();
       Store.save(date); this.renderWorkout(); return;
     }
-    const t = Engine.targets(e, date)[idx] || {};
+    const t = Engine.targets(e, date, log.startedAt)[idx] || {};
     if (s.w == null || s.w === '') s.w = t.w || 0;
     if (s.reps == null || s.reps === '') s.reps = t.reps || 0;
     if (s.rir == null) s.rir = e.mode === 'restpause' ? 0 : e.rir;
@@ -542,8 +753,9 @@ const App = {
       this.renderRest();
       if (!t.fired && Date.now() >= t.endsAt) { t.fired = true; Store.save(); this.alarm(t.label); }
     }
-    if (this.tab === 'workout' && this.cur) {
-      const log = getLog(this.cur.date, false), n = el('sessT');
+    if (this.tab === 'workout' && this.cur && this.cur.sessionId) {
+      const log = getSession(this.cur.date, this.cur.sessionId);
+      const n = el('sessT');
       if (log && log.startedAt && n) n.textContent = hhmmss((Date.now() - log.startedAt) / 1000);
     }
   },
@@ -592,35 +804,279 @@ const App = {
   },
   releaseWakeLock() { try { if (this._wl) { this._wl.release(); this._wl = null; } } catch (e) { } },
 
-  /* ---------- 루틴 편집 ---------- */
-  renderProgram() {
-    el('hSub').textContent = '루틴 템플릿 · 자유 편집';
-    if (this.editProgramId) return this.renderProgramDetail(this.editProgramId);
-    let html = '';
-    Store.s.programs.forEach(p => {
-      html += `<div class="card">
-        <h2>${esc(p.title)} <span class="pill blue">${p.items.length}개</span></h2>
-        <div class="muted" style="margin-bottom:10px">${esc(p.desc || '')}</div>
-        <div class="btnrow">
-          <button class="btn ghost sm" onclick="App.openProgramDetail('${p.id}')">운동 편집</button>
-          <button class="btn ghost sm" onclick="App.renameProgram('${p.id}')">이름 변경</button>
-          <button class="btn danger sm" onclick="App.deleteProgram('${p.id}')">삭제</button>
-        </div></div>`;
-    });
-    html += `<div class="card">
-      <button class="btn" onclick="App.createProgram()">＋ 새 루틴 만들기</button>
-      <div style="height:9px"></div>
-      <button class="btn danger sm" onclick="App.resetProgram()">기본 2분할 루틴으로 복원</button>
-      <div class="tiny" style="margin-top:8px">복원해도 훈련 기록은 지워지지 않습니다.</div>
-    </div>`;
-    el('viewProgram').innerHTML = html;
+  /* ---------- 커뮤니티 ---------- */
+  async renderCommunity(force) {
+    const root = el('viewCommunity');
+    if (!root) return;
+    el('hSub').textContent = '피드 · 감정 반응';
+
+    if (!cloudEnabled()) {
+      root.innerHTML = `<div class="card"><div class="emptybox">
+        config.js에 Supabase를 연결하면 커뮤니티를 쓸 수 있습니다.</div></div>`;
+      return;
+    }
+    if (!Store.user) {
+      root.innerHTML = `<div class="card">
+        <h2>커뮤니티</h2>
+        <div class="muted" style="margin-bottom:12px">로그인하면 피드 작성·반응·운동 완료 공유가 가능합니다.</div>
+        <button class="btn" onclick="App.go('settings')">설정에서 로그인</button>
+      </div>`;
+      return;
+    }
+
+    root.innerHTML = `
+      <div class="card feed-composer">
+        <h2>자유게시판</h2>
+        <textarea id="communityBody" placeholder="오늘 컨디션, 기록, 질문을 남겨보세요"></textarea>
+        <div style="height:10px"></div>
+        <button class="btn" id="communityPostBtn" onclick="App.submitCommunityPost()">게시하기</button>
+      </div>
+      <div id="communityFeed"><div class="card"><div class="muted">피드 불러오는 중…</div></div></div>`;
+
+    if (!force && this.communityPosts && this.communityPosts.length) {
+      this.paintCommunityFeed(this.communityPosts);
+    }
+    try {
+      const posts = await Store.fetchCommunityFeed(50);
+      this.communityPosts = posts;
+      if (this.tab === 'community') this.paintCommunityFeed(posts);
+    } catch (e) {
+      console.warn(e);
+      const box = el('communityFeed');
+      if (box) box.innerHTML = `<div class="card"><div class="emptybox">피드를 불러오지 못했습니다.
+        <div class="tiny" style="margin-top:8px">Supabase SQL에 community_posts / post_reactions 테이블이 있는지 확인하세요.</div>
+      </div></div>`;
+    }
   },
 
-  openProgramDetail(pId) { this.editProgramId = pId; this.renderProgram(); },
+  paintCommunityFeed(posts) {
+    const box = el('communityFeed');
+    if (!box) return;
+    if (!posts || !posts.length) {
+      box.innerHTML = `<div class="card"><div class="emptybox">아직 글이 없습니다. 첫 글을 남겨 보세요.</div></div>`;
+      return;
+    }
+    box.innerHTML = posts.map(p => this.communityCardHtml(p)).join('');
+  },
 
-  renderProgramDetail(pId) {
+  communityCardHtml(p) {
+    const t = p.created_at ? new Date(p.created_at) : null;
+    const time = t
+      ? `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+      : '';
+    const reacts = (CFG.REACTIONS || []).map(r => {
+      const n = (p.counts && p.counts[r.key]) || 0;
+      const on = p.mine && p.mine[r.key] ? ' on' : '';
+      return `<button type="button" class="react-btn${on}" data-post="${p.id}" data-react="${r.key}"
+        onclick="App.onReact('${p.id}','${r.key}')" title="${esc(r.label)}">
+        <span>${r.emoji}</span><span class="cnt" id="rc_${p.id}_${r.key}">${n}</span>
+      </button>`;
+    }).join('');
+    return `<div class="feed-card ${p.post_type === 'workout_complete' ? 'workout' : ''}" id="post_${p.id}">
+      <div class="fc-head">
+        <span class="fc-name">${esc(p.author_name || '익명')}</span>
+        <span class="fc-time">${esc(time)}${p.post_type === 'workout_complete' ? ' · 운동 완료' : ''}</span>
+      </div>
+      <div class="fc-body">${esc(p.body)}</div>
+      <div class="react-bar" id="reactbar_${p.id}">${reacts}</div>
+    </div>`;
+  },
+
+  async submitCommunityPost() {
+    const ta = el('communityBody');
+    const body = ta ? ta.value : '';
+    const btn = el('communityPostBtn');
+    if (btn) btn.disabled = true;
+    try {
+      await Store.createCommunityPost(body, { post_type: 'free' });
+      if (ta) ta.value = '';
+      toast('게시되었습니다');
+      await this.renderCommunity(true);
+    } catch (e) {
+      toast(e.message || '게시 실패');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  },
+
+  async onReact(postId, reactionType) {
+    if (!Store.user) { toast('로그인이 필요합니다'); return; }
+    const bar = el('reactbar_' + postId);
+    if (bar) bar.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      const snap = await Store.toggleReaction(postId, reactionType);
+      const post = (this.communityPosts || []).find(p => p.id === postId);
+      if (post) { post.counts = snap.counts; post.mine = snap.mine; }
+      /* DOM만 갱신 — 전체 리렌더 없이 */
+      (CFG.REACTIONS || []).forEach(r => {
+        const cnt = el(`rc_${postId}_${r.key}`);
+        if (cnt) cnt.textContent = (snap.counts[r.key] || 0);
+        const btn = bar && bar.querySelector(`[data-react="${r.key}"]`);
+        if (btn) btn.classList.toggle('on', !!snap.mine[r.key]);
+      });
+    } catch (e) {
+      toast(e.message || '반응 실패');
+    } finally {
+      if (bar) bar.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    }
+  },
+
+  /* ---------- AI 루틴 빌더 ---------- */
+  openAiRoutineModal() {
+    if (!geminiEnabled()) {
+      modal('AI 루틴', `<div class="muted" style="margin-bottom:12px">
+        <code>config.js</code>의 <b>CONFIG.GEMINI_API_KEY</b>를 입력하면 Gemini로 오늘 루틴을 만들 수 있습니다.</div>
+        <button class="btn" onclick="closeModal()">확인</button>`);
+      return;
+    }
+    if (!Array.isArray(this._aiTargets) || !this._aiTargets.length) {
+      this._aiTargets = ['chest', 'back'];
+    }
+    this._aiLevel = this._aiLevel || 'intermediate';
+    this._aiStyle = this._aiStyle || 'bodybuilding';
+
+    const targetOpts = [
+      ['chest', '가슴'], ['back', '등'], ['shoulders', '어깨'],
+      ['legs', '하체'], ['arms', '팔'], ['core', '복근']
+    ];
+    const levelOpts = [
+      ['beginner', '초보자 (기초 체력)'],
+      ['intermediate', '중급자 (볼륨 정체기)'],
+      ['advanced', '상급자/엘리트 (고강도 스트렝스)']
+    ];
+    const styleOpts = [
+      ['strength', '스트렝스 (고중량 저반복)'],
+      ['bodybuilding', '보디빌딩 (근비대/펌핑)'],
+      ['conditioning', '컨디셔닝 (기능성/다이어트)']
+    ];
+
+    const multiChips = targetOpts.map(([k, lbl]) =>
+      `<button type="button" class="ai-chip multi ${this._aiTargets.includes(k) ? 'on' : ''}"
+        data-g="target" data-v="${k}" onclick="App.toggleAiTarget('${k}')">${lbl}</button>`
+    ).join('');
+    const singleChips = (opts, group, cur) => opts.map(([k, lbl]) =>
+      `<button type="button" class="ai-chip ${cur === k ? 'on' : ''}"
+        data-g="${group}" data-v="${k}" onclick="App.pickAiOption('${group}','${k}')">${lbl}</button>`
+    ).join('');
+
+    modal('AI 루틴 생성', `
+      <div class="muted">부위·숙련도·스타일을 고르면 성별 · SBD e1RM · 근육 회복도를 반영해 루틴을 만듭니다.</div>
+
+      <div class="ai-sec-label">1. 타겟 부위</div>
+      <div class="ai-sec-hint">여러 개 선택 가능 · 다시 누르면 해제</div>
+      <div class="ai-opt" id="aiTargetChips">${multiChips}</div>
+
+      <div class="ai-sec-label">2. 운동 숙련도</div>
+      <div class="ai-opt" id="aiLevelChips">${singleChips(levelOpts, 'level', this._aiLevel)}</div>
+
+      <div class="ai-sec-label">3. 트레이닝 스타일</div>
+      <div class="ai-opt" id="aiStyleChips">${singleChips(styleOpts, 'style', this._aiStyle)}</div>
+
+      <div class="ai-status" id="aiStatus"></div>
+      <div class="btnrow">
+        <button class="btn ghost sm" onclick="closeModal()">취소</button>
+        <button class="btn sm" id="aiRunBtn" onclick="App.runAiRoutine()">루틴 생성</button>
+      </div>`);
+  },
+
+  toggleAiTarget(key) {
+    if (!Array.isArray(this._aiTargets)) this._aiTargets = [];
+    const i = this._aiTargets.indexOf(key);
+    if (i >= 0) this._aiTargets.splice(i, 1);
+    else this._aiTargets.push(key);
+    const wrap = el('aiTargetChips');
+    if (!wrap) return;
+    wrap.querySelectorAll('.ai-chip').forEach(b => {
+      b.classList.toggle('on', this._aiTargets.includes(b.dataset.v));
+    });
+  },
+
+  pickAiOption(group, value) {
+    if (group === 'level') this._aiLevel = value;
+    else if (group === 'style') this._aiStyle = value;
+    const wrap = el(group === 'level' ? 'aiLevelChips' : 'aiStyleChips');
+    if (!wrap) return;
+    wrap.querySelectorAll('.ai-chip').forEach(b => {
+      b.classList.toggle('on', b.dataset.v === value);
+    });
+  },
+
+  collectAiRoutineOptions() {
+    const targets = Array.isArray(this._aiTargets) ? this._aiTargets.slice() : [];
+    if (!targets.length) {
+      alert('최소 한 개 이상의 부위를 선택해주세요');
+      return null;
+    }
+    const level = this._aiLevel || 'intermediate';
+    const style = this._aiStyle || 'bodybuilding';
+    return { targets, level, style };
+  },
+
+  async runAiRoutine() {
+    const opts = this.collectAiRoutineOptions();
+    if (!opts) return;
+
+    const btn = el('aiRunBtn');
+    const st = el('aiStatus');
+    if (btn) btn.disabled = true;
+    if (st) st.textContent = 'Gemini가 루틴을 작성 중…';
+    try {
+      const raw = await Store.generateAiRoutine(opts, (msg) => {
+        if (st) st.textContent = msg;
+      });
+      const items = Store.mapAiExercises(raw.exercises);
+      if (!items.length) throw new Error('운동이 비어 있습니다');
+
+      const targetKo = {
+        chest: '가슴', back: '등', shoulders: '어깨',
+        legs: '하체', arms: '팔', core: '복근'
+      };
+      const parts = opts.targets.map(t => targetKo[t] || t).join('·');
+      const pid = 'p_ai_' + Date.now().toString(36);
+      const prog = {
+        id: pid,
+        title: `AI · ${parts}`,
+        desc: String(raw.description || '').trim(),
+        dayHint: '',
+        items,
+        aiGenerated: true
+      };
+      Store.s.programs = Store.s.programs.filter(p => !p.aiGenerated);
+      Store.s.programs.unshift(prog);
+      Store.save();
+
+      closeModal();
+      toast('AI 루틴 준비 완료');
+      this.startSession(getTodayStr(), pid);
+    } catch (e) {
+      const msg = (e && e.message) ? e.message : String(e);
+      console.error('[AI 루틴] 실패', e);
+      if (st) st.textContent = msg.split('\n')[0];
+      toast(msg.includes('429') || msg.includes('할당량') ? '할당량 초과 — 잠시 후 재시도' : 'AI 루틴 생성 실패');
+      try { alert('AI 루틴 오류\n\n' + msg); } catch (a) { /* ignore */ }
+      if (btn) btn.disabled = false;
+    }
+  },
+
+  /* ---------- 루틴 편집 (홈 탭 내장) ---------- */
+  openProgramDetail(pId) {
+    closeModal();
+    this.editProgramId = pId;
+    if (this.tab !== 'home') this.go('home');
+    else this.render();
+  },
+
+  closeProgramDetail() {
+    this.editProgramId = null;
+    this.render();
+  },
+
+  buildProgramDetailHtml(pId) {
     const p = Store.s.programs.find(x => x.id === pId);
-    if (!p) { this.editProgramId = null; return this.renderProgram(); }
+    if (!p) {
+      this.editProgramId = null;
+      return '<div class="card"><div class="emptybox">루틴을 찾을 수 없습니다</div></div>';
+    }
     const items = p.items.map((e, i) => `
       <div class="exitem">
         <div class="iconb">${i + 1}</div>
@@ -632,10 +1088,10 @@ const App = {
         <button class="iconb" onclick="App.editExercise('${pId}',${i})">✎</button>
         <button class="iconb del" onclick="App.deleteExercise('${pId}',${i})">✕</button>
       </div>`).join('') || '<div class="emptybox">운동이 없습니다</div>';
-    el('viewProgram').innerHTML = `
+    return `
       <div class="card">
         <h2>${esc(p.title)}
-          <button class="pill blue" onclick="App.editProgramId=null;App.render()">← 목록</button></h2>
+          <button class="pill blue" onclick="App.closeProgramDetail()">← 목록</button></h2>
         <div class="muted" style="margin-bottom:8px">${esc(p.desc || '')}</div>
         ${items}
         <div style="height:9px"></div>
@@ -648,21 +1104,27 @@ const App = {
     if (!t) return;
     const p = { id: 'p' + Math.random().toString(36).slice(2, 8), title: t.trim(), desc: '', dayHint: '', items: [] };
     Store.s.programs.push(p);
-    Store.save(); this.openProgramDetail(p.id);
+    Store.save();
+    this.syncHomeAfterRoutineEdit();
+    this.openProgramDetail(p.id);
   },
   renameProgram(pId) {
     const p = Store.s.programs.find(x => x.id === pId);
     const t = prompt('루틴 이름', p.title); if (t == null) return;
     const d = prompt('설명', p.desc || '');
     p.title = t.trim() || p.title; if (d != null) p.desc = d.trim();
-    Store.save(); this.render();
+    Store.save();
+    this.syncHomeAfterRoutineEdit();
+    if (this.editProgramId) this.render();
   },
   deleteProgram(pId) {
     const p = Store.s.programs.find(x => x.id === pId);
     if (!confirm(`"${p.title}" 루틴을 삭제할까요? (기록은 남습니다)`)) return;
     Store.s.programs = Store.s.programs.filter(x => x.id !== pId);
     if (this.editProgramId === pId) this.editProgramId = null;
-    Store.save(); this.render();
+    Store.save();
+    this.syncHomeAfterRoutineEdit();
+    if (this.editProgramId === null && this.tab === 'home') this.render();
   },
   moveExercise(pId, i, d) {
     const arr = Store.s.programs.find(x => x.id === pId).items;
@@ -771,68 +1233,136 @@ const App = {
     if (!confirm('기본 2분할 루틴으로 되돌릴까요? (기록은 유지)')) return;
     Store.s.programs = defaultPrograms();
     this.editProgramId = null;
-    Store.save(); this.render(); toast('기본 루틴 복원');
+    Store.save();
+    this.syncHomeAfterRoutineEdit();
+    this.render();
+    toast('기본 루틴 복원');
   },
 
-  /* ---------- 기록 ---------- */
-  renderStats() {
-    el('hSub').textContent = 'e1RM 추이 · 세션 누적';
-    const dates = Engine.datesSorted().filter(d => dayDone(d) > 0);
-    const u = Store.s.settings.unit || 'kg';
-    if (!dates.length) {
-      el('viewStats').innerHTML = `<div class="card"><div class="emptybox">
-        아직 기록이 없습니다.<br><span class="tiny">세션을 완료하면 다음 목표가 자동 계산됩니다.</span></div></div>`;
+  /* ---------- 분석 / 기록 (통합) ---------- */
+  setBodySide(side) {
+    this.bodySide = side === 'back' ? 'back' : 'front';
+    document.querySelectorAll('.body-side-toggle .bst').forEach(b => {
+      b.classList.toggle('on', b.dataset.side === this.bodySide);
+    });
+    if (this.tab === 'analyze') this.renderAnalyze();
+  },
+
+  setGender(g) {
+    Store.s.settings.gender = g === 'female' ? 'female' : 'male';
+    Store.save();
+    toast(Store.s.settings.gender === 'female' ? '여성 해부도로 설정' : '남성 해부도로 설정');
+    this.render();
+  },
+
+  recoveryFillColor(status) {
+    if (!status || status.lastTrainedAt == null) return '#e5e7eb';
+    const pct = status.recoveryPct;
+    if (pct >= 80) return '#4ade80';
+    if (pct >= 40) return '#facc15';
+    return '#f87171';
+  },
+
+  async paintMuscleRecovery(recovery) {
+    const root = el('analyzeBodyMap');
+    if (!root || typeof BodyMap === 'undefined') return;
+    const gender = Store.s.settings.gender === 'female' ? 'female' : 'male';
+    const side = this.bodySide === 'back' ? 'back' : 'front';
+    if (root.dataset.g === gender && root.dataset.s === side && root.querySelector('svg')) {
+      BodyMap.paint(root, recovery);
       return;
     }
-    const tomorrow = dateStrOf(new Date(Date.now() + 86400000));
-    let html = '<div class="card"><h2>메인 리프트 e1RM</h2>';
-    ['스쿼트', '벤치프레스', '데드리프트'].forEach(lift => {
-      const b = Store.s.settings.baseline[lift];
-      const b0 = b && b.w ? e1rmOf(b.w, b.reps, b.rir) : 0;
-      if (!b0) {
-        html += `<div style="margin-bottom:10px"><b style="font-size:13px">${lift}</b>
-          <div class="tiny">기준 기록이 없어 처방이 계산되지 않습니다. 설정에서 입력하세요.</div></div>`;
-        return;
-      }
-      const series = dates.map(d => Engine.bestE1ForDate(d, lift)).filter(v => v > 0);
-      const applied = Engine.appliedE1(lift, tomorrow);
-      const mx = Math.max(b0, ...series, 1);
-      const bars = [b0].concat(series)
-        .map((v, i, a) => `<i class="${i === a.length - 1 ? 'last' : ''}" style="height:${Math.max(4, v / mx * 100)}%"></i>`).join('');
-      const diff = applied - b0;
-      html += `<div style="margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;align-items:baseline">
-          <b style="font-size:13px">${lift}</b>
-          <span><b style="font-size:16px">${applied}</b><span class="tiny"> ${u}</span>
-          <span class="pill ${diff > 0 ? 'green' : diff < 0 ? 'red' : 'blue'}">${diff >= 0 ? '+' : ''}${diff.toFixed(1)}</span></span>
-        </div>
-        <div class="spark">${bars}</div>
-        <div class="tiny">기준 ${b0.toFixed(1)} → 다음 세션 적용 ${applied}${u}</div>
-      </div>`;
-    });
-    html += '</div>';
+    await BodyMap.render(root, { gender, side, recovery });
+  },
 
-    dates.slice().reverse().slice(0, 30).forEach(d => {
-      const log = Store.s.logs[d];
-      const p = Store.s.programs.find(x => x.id === log.programId);
-      let rows = '', vol = 0, n = 0;
-      Object.entries(log.sets).forEach(([exId, arr]) => {
-        const e = findExById(exId);
-        const done = (arr || []).filter(s => s && s.done);
-        if (!done.length) return;
-        const reps = done.reduce((a, s) => a + (+s.reps || 0), 0);
-        const v = done.reduce((a, s) => a + (+s.reps || 0) * (+s.w || 0), 0);
-        vol += v; n += done.length;
-        rows += `<tr><td style="text-align:left">${esc(e ? e.name : '(삭제됨)')}</td>
-          <td>${done.length}</td><td>${reps}</td><td>${Math.round(v).toLocaleString()}</td></tr>`;
-      });
-      html += `<div class="card"><h2>${d}
-        <span class="pill blue">${n}세트 · ${Math.round(vol).toLocaleString()}${u}</span></h2>
-        <div class="muted" style="margin-bottom:6px">${esc(p ? p.title : '루틴 미지정')}</div>
-        <table class="hist"><thead><tr><th style="text-align:left">종목</th><th>세트</th><th>총반복</th><th>볼륨</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
+  renderWeekVolumeChart(daily) {
+    const chart = el('analyzeWeekChart');
+    const meta = el('analyzeVolMeta');
+    const badge = el('analyzeVolBadge');
+    if (!chart || !daily) return;
+
+    const u = daily.unit || 'kg';
+    const max = Math.max(1, ...daily.days.map(d => d.volume));
+    const change = daily.changePct;
+    const changeTxt = change == null ? '—' : `${change >= 0 ? '+' : ''}${change}%`;
+
+    if (badge) {
+      badge.className = 'pill ' + (change == null ? 'blue' : change >= 0 ? 'green' : 'red');
+      badge.textContent = changeTxt;
+    }
+    if (meta) {
+      meta.textContent =
+        `합계 ${daily.total.toLocaleString()}${u} · 지난주 ${daily.lastWeek.toLocaleString()}${u}`;
+    }
+
+    chart.innerHTML = daily.days.map(d => {
+      const h = d.volume > 0 ? Math.max(8, Math.round((d.volume / max) * 100)) : 3;
+      const tip = d.volume > 0
+        ? (d.volume >= 1000 ? `${Math.round(d.volume / 100) / 10}k` : String(d.volume))
+        : '';
+      return `<div class="vol-col${d.isToday ? ' today' : ''}" title="${d.dateStr} · ${d.volume.toLocaleString()}${u}">
+        <div class="vol-val">${tip}</div>
+        <div class="vol-bar-track"><div class="vol-bar" style="height:${h}%"></div></div>
+        <div class="vol-lbl">${d.label}</div>
+      </div>`;
+    }).join('');
+  },
+
+  renderE1rmCards(e1rm) {
+    const list = el('analyzeE1rmList');
+    if (!list) return;
+    const u = Store.s.settings.unit || 'kg';
+    const lifts = [
+      { key: '스쿼트', en: 'SQUAT' },
+      { key: '벤치프레스', en: 'BENCH' },
+      { key: '데드리프트', en: 'DEADLIFT' }
+    ];
+
+    list.innerHTML = lifts.map(({ key, en }) => {
+      const x = e1rm && e1rm[key];
+      if (!x || x.currentE1 == null) {
+        return `<div class="e1-card empty">
+          <div><div class="name">${key}</div><div class="sub">${en} · 기준 기록 필요</div></div>
+          <div class="val">—</div>
+        </div>`;
+      }
+      const d = x.deltaFromLastWeek;
+      let deltaCls = 'flat', deltaTxt = '지난주 대비 —';
+      if (d != null) {
+        if (d > 0) { deltaCls = 'up'; deltaTxt = `지난주 대비 +${d}${u}`; }
+        else if (d < 0) { deltaCls = 'down'; deltaTxt = `지난주 대비 ${d}${u}`; }
+        else { deltaTxt = '지난주 대비 변동 없음'; }
+      }
+      return `<div class="e1-card">
+        <div>
+          <div class="name">${key}</div>
+          <div class="sub">${en}${x.latestDate ? ' · ' + x.latestDate : ''}</div>
+        </div>
+        <div>
+          <div class="val">${x.currentE1}<small>${u}</small></div>
+          <div class="delta ${deltaCls}">${deltaTxt}</div>
+        </div>
+      </div>`;
+    }).join('');
+  },
+
+  renderAnalyze() {
+    el('hSub').textContent = '캘린더 · 회복도 · 볼륨 · e1RM';
+    const todayStr = getTodayStr();
+    const cal = el('analyzeCalendar');
+    if (cal) cal.innerHTML = this.buildCalendarBlock(todayStr);
+
+    const recovery = Store.getMuscleRecoveryStatus();
+    const daily = Store.getDailyVolumesThisWeek();
+    const e1rm = Store.getMainLiftE1RM();
+
+    document.querySelectorAll('.body-side-toggle .bst').forEach(b => {
+      b.classList.toggle('on', b.dataset.side === (this.bodySide || 'front'));
     });
-    el('viewStats').innerHTML = html;
+
+    this.renderWeekVolumeChart(daily);
+    this.renderE1rmCards(e1rm);
+    this.paintMuscleRecovery(recovery);
   },
 
   /* ---------- 설정 ---------- */
@@ -890,6 +1420,12 @@ const App = {
           <div class="field"><label>나이</label><input type="number" value="${st.age || ''}" onchange="App.setSetting('age',this.value)"></div>
           <div class="field"><label>안정시 심박</label><input type="number" value="${st.rhr || 70}" onchange="App.setSetting('rhr',this.value)"></div>
           <div class="field"><label>Zone2(분)</label><input type="number" value="${st.cardioMin}" onchange="App.setSetting('cardioMin',this.value)"></div>
+        </div>
+        <div class="field" style="margin-top:8px"><label>성별 (해부도)</label>
+          <div class="gender-toggle">
+            <button type="button" class="gt ${st.gender !== 'female' ? 'on' : ''}" onclick="App.setGender('male')">남성</button>
+            <button type="button" class="gt ${st.gender === 'female' ? 'on' : ''}" onclick="App.setGender('female')">여성</button>
+          </div>
         </div>
         ${CardioEngine.renderDashboard()}
       </div>
@@ -973,6 +1509,7 @@ const App = {
             Store.meta.logAt[k] = Date.now();
             if (!Store.meta.dirtyLogs.includes(k)) Store.meta.dirtyLogs.push(k);
           });
+          Store.migrateLogsToSessions();
           Store.writeLocal(); Store.scheduleSync();
           toast('복원 완료'); this.go('home');
         } catch (e) { toast('파일을 읽을 수 없습니다'); }

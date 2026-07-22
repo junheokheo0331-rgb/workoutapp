@@ -105,7 +105,7 @@ function defaultPrograms() {
 const DEFAULT_STATE = () => ({
   version: 6,
   settings: {
-    isFirstRun: true, age: null, rhr: 70, unit: 'kg',
+    isFirstRun: true, age: null, gender: 'male', rhr: 70, unit: 'kg',
     unitBar: 10, unitMachine: 5, unitDumbbell: 2,
     capUp: 0.025, capDown: 0.03,
     baseline: {
@@ -150,7 +150,21 @@ const Store = {
     Object.keys(d.settings).forEach(k => {
       if (this.s.settings[k] === undefined) this.s.settings[k] = d.settings[k];
     });
+    this.migrateLogsToSessions();
     return this.s;
+  },
+
+  /** 구형 하루 1로그 → sessions[] 배열로 승격 */
+  migrateLogsToSessions() {
+    const logs = this.s.logs || {};
+    let changed = false;
+    Object.keys(logs).forEach(dateStr => {
+      const raw = logs[dateStr];
+      if (!raw || Array.isArray(raw.sessions)) return;
+      logs[dateStr] = normalizeDayLog(raw, dateStr);
+      changed = true;
+    });
+    if (changed) this.writeLocal();
   },
 
   writeLocal() {
@@ -175,6 +189,29 @@ const Store = {
     }
     this.writeLocal();
     this.scheduleSync();
+  },
+
+  /**
+   * 특정 날짜의 특정 세션만 삭제.
+   * 삭제 후 로컬 저장 + 클라우드 dirty 표시 → 통계/e1RM은 다음 렌더에서 재연산.
+   */
+  deleteWorkoutSession(dateStr, sessionId) {
+    if (!dateStr || !sessionId) return false;
+    this.migrateLogsToSessions();
+    const day = this.s.logs[dateStr];
+    if (!day || !Array.isArray(day.sessions)) return false;
+    const next = day.sessions.filter(s => s.id !== sessionId);
+    if (next.length === day.sessions.length) return false;
+    if (next.length) {
+      day.sessions = next;
+    } else {
+      delete this.s.logs[dateStr];
+    }
+    if (this.s.session && this.s.session.sessionId === sessionId) {
+      this.s.session = null;
+    }
+    this.save(dateStr);
+    return true;
   },
 
   /** 설정·루틴 + 로그를 한꺼번에 더럽힘 처리 */
@@ -305,7 +342,7 @@ const Store = {
         const remoteAt = new Date(r.updated_at).getTime();
         const localAt = this.meta.logAt[r.log_date] || 0;
         if (remoteAt > localAt && r.payload) {
-          this.s.logs[r.log_date] = r.payload;
+          this.s.logs[r.log_date] = normalizeDayLog(r.payload, r.log_date);
           this.meta.logAt[r.log_date] = remoteAt;
           changed = true;
         }
@@ -325,6 +362,458 @@ const Store = {
     const changed = await this.pull();
     await this.push();
     return changed;
+  },
+
+  /* ---------- 분석 (engine Analytics 래퍼) ---------- */
+  getMuscleRecoveryStatus(nowMs) {
+    return Analytics.getMuscleRecoveryStatus(this.s.logs, nowMs);
+  },
+  getMainLiftE1RM(asOfDate) {
+    return Analytics.getMainLiftE1RM(this.s.logs, asOfDate);
+  },
+  getWeeklyVolumeComparison(nowDate) {
+    return Analytics.getWeeklyVolumeComparison(this.s.logs, nowDate);
+  },
+  getDailyVolumesThisWeek(nowDate) {
+    return Analytics.getDailyVolumesThisWeek(this.s.logs, nowDate);
+  },
+  getAnalyticsSnapshot() {
+    return Analytics.snapshot();
+  },
+
+  /* ---------- 커뮤니티 ---------- */
+  async fetchCommunityFeed(limit) {
+    if (!cloudEnabled() || !this.user) return [];
+    const lim = limit || 40;
+    const { data: posts, error } = await sb.from(CFG.TABLE_POSTS)
+      .select('id,user_id,author_name,body,post_type,volume_kg,created_at')
+      .order('created_at', { ascending: false })
+      .limit(lim);
+    if (error) throw error;
+    if (!posts || !posts.length) return [];
+
+    const ids = posts.map(p => p.id);
+    const { data: reacts, error: e2 } = await sb.from(CFG.TABLE_REACTIONS)
+      .select('post_id,user_id,reaction_type')
+      .in('post_id', ids);
+    if (e2) throw e2;
+
+    const byPost = {};
+    (reacts || []).forEach(r => {
+      if (!byPost[r.post_id]) byPost[r.post_id] = [];
+      byPost[r.post_id].push(r);
+    });
+
+    const myId = this.user.id;
+    return posts.map(p => {
+      const list = byPost[p.id] || [];
+      const counts = { like: 0, sad: 0, fire: 0, cheer: 0, respect: 0 };
+      const mine = {};
+      list.forEach(r => {
+        if (counts[r.reaction_type] != null) counts[r.reaction_type]++;
+        if (r.user_id === myId) mine[r.reaction_type] = true;
+      });
+      return Object.assign({}, p, { counts, mine });
+    });
+  },
+
+  async createCommunityPost(body, opts) {
+    if (!cloudEnabled() || !this.user) throw new Error('로그인이 필요합니다');
+    const text = String(body || '').trim();
+    if (!text) throw new Error('내용을 입력하세요');
+    const row = {
+      user_id: this.user.id,
+      author_name: this.user.name || '익명',
+      body: text,
+      post_type: (opts && opts.post_type) || 'free',
+      volume_kg: (opts && opts.volume_kg != null) ? opts.volume_kg : null
+    };
+    const { data, error } = await sb.from(CFG.TABLE_POSTS).insert(row).select().single();
+    if (error) throw error;
+    return data;
+  },
+
+  /** 세션 종료 자동 피드 — 실패해도 조용히 무시 */
+  async postWorkoutComplete(volumeKg) {
+    if (!cloudEnabled() || !this.user) return null;
+    const vol = Math.round(+volumeKg || 0);
+    const name = this.user.name || '회원';
+    const body = `${name}님이 오늘 운동을 완료했어요! (총 볼륨 ${vol}kg)`;
+    try {
+      return await this.createCommunityPost(body, {
+        post_type: 'workout_complete',
+        volume_kg: vol
+      });
+    } catch (e) {
+      console.warn('community auto-post failed', e);
+      return null;
+    }
+  },
+
+  /**
+   * 이모티콘 토글. 반환: { counts, mine } 갱신 스냅샷
+   */
+  async toggleReaction(postId, reactionType) {
+    if (!cloudEnabled() || !this.user) throw new Error('로그인이 필요합니다');
+    const keys = (CFG.REACTIONS || []).map(r => r.key);
+    if (!keys.includes(reactionType)) throw new Error('알 수 없는 반응');
+
+    const { data: existing } = await sb.from(CFG.TABLE_REACTIONS)
+      .select('id')
+      .eq('post_id', postId)
+      .eq('user_id', this.user.id)
+      .eq('reaction_type', reactionType)
+      .maybeSingle();
+
+    if (existing && existing.id) {
+      const { error } = await sb.from(CFG.TABLE_REACTIONS).delete().eq('id', existing.id);
+      if (error) throw error;
+    } else {
+      const { error } = await sb.from(CFG.TABLE_REACTIONS).insert({
+        post_id: postId,
+        user_id: this.user.id,
+        reaction_type: reactionType
+      });
+      if (error) throw error;
+    }
+
+    const { data: reacts, error: e2 } = await sb.from(CFG.TABLE_REACTIONS)
+      .select('user_id,reaction_type')
+      .eq('post_id', postId);
+    if (e2) throw e2;
+
+    const counts = { like: 0, sad: 0, fire: 0, cheer: 0, respect: 0 };
+    const mine = {};
+    (reacts || []).forEach(r => {
+      if (counts[r.reaction_type] != null) counts[r.reaction_type]++;
+      if (r.user_id === this.user.id) mine[r.reaction_type] = true;
+    });
+    return { counts, mine };
+  },
+
+  /* ---------- Gemini AI 루틴 ---------- */
+  buildAiUserContext(opts) {
+    const st = this.s.settings || {};
+    const e1 = this.getMainLiftE1RM();
+    const rec = this.getMuscleRecoveryStatus();
+    const recoveryBrief = Object.keys(rec).map(k => {
+      const r = rec[k];
+      return `${r.label || k}:${r.recoveryPct}%`;
+    }).join(', ');
+    const sbd = ['스쿼트', '벤치프레스', '데드리프트'].map(l => {
+      const x = e1[l];
+      const v = x && x.currentE1 != null ? Math.round(x.currentE1) : 0;
+      return `${l}:${v}kg`;
+    }).join(', ');
+    const o = opts || {};
+    return {
+      targets: Array.isArray(o.targets) ? o.targets : [],
+      level: o.level || 'intermediate',
+      style: o.style || 'bodybuilding',
+      gender: st.gender === 'female' ? 'female' : 'male',
+      age: st.age,
+      unit: st.unit || 'kg',
+      sbdE1RM: sbd,
+      muscleRecovery: recoveryBrief
+    };
+  },
+
+  async generateAiRoutine(opts, onProgress) {
+    if (!geminiEnabled()) throw new Error('config.js에 GEMINI_API_KEY를 입력하세요');
+    if (!CONFIG || !String(CONFIG.GEMINI_API_KEY || '').trim()) {
+      throw new Error('CONFIG.GEMINI_API_KEY가 없습니다');
+    }
+
+    /* 구버전 호환: (focus, style, onProgress) */
+    if (typeof opts === 'string') {
+      const focus = opts;
+      const style = onProgress;
+      onProgress = arguments[2];
+      const focusMap = {
+        upper: ['chest', 'back', 'shoulders', 'arms'],
+        lower: ['legs'],
+        beginner_full: ['chest', 'back', 'legs', 'core'],
+        auto: ['chest', 'back', 'legs']
+      };
+      opts = {
+        targets: focusMap[focus] || ['chest', 'back'],
+        level: focus === 'beginner_full' ? 'beginner' : 'intermediate',
+        style: style === 'endurance' ? 'conditioning' : (style || 'bodybuilding')
+      };
+    }
+
+    const cool = CONFIG.GEMINI_COOLDOWN_MS || 12000;
+    const since = Date.now() - (this._aiLastOkAt || 0);
+    if (this._aiLastOkAt && since < cool) {
+      const waitSec = Math.ceil((cool - since) / 1000);
+      throw new Error(`요청이 너무 빠릅니다. ${waitSec}초 후 다시 시도해 주세요. (429 방지)`);
+    }
+
+    const ctx = this.buildAiUserContext(opts);
+    const targetKo = {
+      chest: '가슴', back: '등', shoulders: '어깨',
+      legs: '하체', arms: '팔', core: '복근'
+    };
+    const levelKo = {
+      beginner: '초보자 (기초 체력)',
+      intermediate: '중급자 (볼륨 정체기)',
+      advanced: '상급자/엘리트 (고강도 스트렝스)'
+    };
+    const styleKo = {
+      strength: '스트렝스 (고중량 저반복)',
+      bodybuilding: '보디빌딩 (근비대/펌핑)',
+      conditioning: '컨디셔닝 (기능성/다이어트)'
+    };
+    const targetsLabel = (ctx.targets || []).map(t => targetKo[t] || t).join(', ');
+    const levelLabel = levelKo[ctx.level] || ctx.level;
+    const styleLabel = styleKo[ctx.style] || ctx.style;
+
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        description: { type: 'STRING' },
+        exercises: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              name: { type: 'STRING' },
+              equip: { type: 'STRING' },
+              lift: { type: 'STRING' },
+              sets: { type: 'INTEGER' },
+              repLo: { type: 'INTEGER' },
+              repHi: { type: 'INTEGER' },
+              rir: { type: 'NUMBER' },
+              rest: { type: 'INTEGER' },
+              type: { type: 'STRING' },
+              targetMin: { type: 'INTEGER' },
+              note: { type: 'STRING' }
+            },
+            required: ['name', 'sets', 'repLo', 'repHi', 'rir', 'rest', 'type']
+          }
+        }
+      },
+      required: ['description', 'exercises']
+    };
+
+    const styleGuide = {
+      strength: '고중량·저반복(대체로 3~6회), RIR 1~3, 휴식 180~240초. 컴파운드 우선.',
+      bodybuilding: '근비대 볼륨(대체로 8~15회), RIR 0~2, 주동근/길항근 슈퍼세트 또는 펌프 마무리 권장.',
+      conditioning: '대사 스트레스·짧은 휴식, 기능성/서킷 감각. 필요 시 cardio 1종 포함.'
+    }[ctx.style] || '';
+
+    const levelGuide = {
+      beginner: '머신·기본 컴파운드 위주, 복잡한 고급 테크닉 지양, 세트 수 보수적.',
+      intermediate: '정체 돌파용 볼륨/변형 허용, 보조 운동으로 약점 보완.',
+      advanced: '고강도 스트렝스·고급 변형 허용, 회복도 낮은 부위는 과부하 금지.'
+    }[ctx.level] || '';
+
+    const prompt =
+`당신은 스포츠의학·근력 트레이닝 코치다. 아래 조건에 맞는 오늘 1회 세션 루틴을 JSON으로만 작성하라.
+
+타겟 부위: [${targetsLabel}]
+숙련도: [${levelLabel}]
+스타일: [${styleLabel}]
+조건에 부합하는 주동근/길항근 슈퍼세트 혹은 적절한 세트·반복수(RIR/RPE 기반) 배치를 반영하라.
+
+유저 상태:
+성별=${ctx.gender}, 나이=${ctx.age ?? '미상'}, 단위=${ctx.unit}
+SBD e1RM: ${ctx.sbdE1RM}
+부위별 회복도(%): ${ctx.muscleRecovery}
+
+스타일 가이드: ${styleGuide}
+숙련도 가이드: ${levelGuide}
+
+규칙(출력 JSON 스키마는 반드시 준수):
+- exercises 4~8개. 선택 타겟 부위를 우선 자극하되, 회복도가 낮은 부위는 과부하하지 말 것.
+- type은 "weight" 또는 "cardio". cardio면 targetMin(분) 필수.
+- equip은 바벨/덤벨/머신/케이블/맨몸/유산소 중 하나.
+- lift는 스쿼트/벤치프레스/데드리프트 중 하나이거나 빈 문자열.
+- RIR은 0~4 범위. 중량 숫자는 넣지 말고 세트·반복·RIR·휴식(초)만.
+- description은 스포츠의학적 근거를 한국어 2~3문장.
+- note에 슈퍼세트 페어·주동근/길항근 힌트를 짧게 적을 수 있다.`;
+
+    const apiKey = String(CONFIG.GEMINI_API_KEY).trim();
+    const models = [CONFIG.GEMINI_MODEL || 'gemini-3.1-flash-lite']
+      .concat(CONFIG.GEMINI_FALLBACK_MODELS || [])
+      .filter((m, i, arr) => m && arr.indexOf(m) === i);
+    const maxRetries = Math.max(1, CONFIG.GEMINI_MAX_RETRIES || 3);
+    const baseMs = CONFIG.GEMINI_RETRY_BASE_MS || 3000;
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const progress = (msg) => { if (typeof onProgress === 'function') onProgress(msg); };
+
+    const body = JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.5,
+        maxOutputTokens: 2048,
+        responseMimeType: 'application/json',
+        responseSchema: schema
+      }
+    });
+
+    let lastErr = null;
+    for (let mi = 0; mi < models.length; mi++) {
+      const model = models[mi];
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const url =
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+        progress(mi === 0 && attempt === 1
+          ? 'Gemini가 루틴을 작성 중…'
+          : `재시도 ${attempt}/${maxRetries} · ${model}`);
+
+        let res;
+        try {
+          res = await fetch(url, {
+            method: 'POST',
+            mode: 'cors',
+            credentials: 'omit',
+            cache: 'no-store',
+            referrerPolicy: 'no-referrer',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey
+            },
+            body
+          });
+        } catch (netErr) {
+          lastErr = new Error('Gemini 네트워크 오류: ' + (netErr.message || netErr));
+          console.error('[Gemini]', lastErr);
+          if (attempt < maxRetries) {
+            await sleep(baseMs * attempt);
+            continue;
+          }
+          break;
+        }
+
+        if (res.ok) {
+          const raw = await res.json();
+          const text = raw && raw.candidates && raw.candidates[0]
+            && raw.candidates[0].content && raw.candidates[0].content.parts
+            && raw.candidates[0].content.parts[0]
+            ? raw.candidates[0].content.parts[0].text : '';
+          let parsed;
+          try { parsed = JSON.parse(text); }
+          catch (e) {
+            lastErr = new Error('Gemini JSON 파싱 실패 — 응답 형식을 확인하세요');
+            console.error('[Gemini] JSON 파싱 실패', text);
+            break;
+          }
+          if (!parsed || !Array.isArray(parsed.exercises) || !parsed.exercises.length) {
+            lastErr = new Error('유효한 운동 목록이 없습니다');
+            break;
+          }
+          this._aiLastOkAt = Date.now();
+          return parsed;
+        }
+
+        const errTxt = await res.text().catch(() => '');
+        let detail = errTxt;
+        let reason = '';
+        let retryMs = 0;
+        try {
+          const j = JSON.parse(errTxt);
+          detail = (j.error && (j.error.message || j.error.status)) || errTxt;
+          const info = j.error && Array.isArray(j.error.details)
+            ? j.error.details.find(d => d && d.reason) : null;
+          if (info && info.reason) reason = info.reason;
+          /* Google이 내려주는 재시도 지연(초) */
+          const retryInfo = j.error && Array.isArray(j.error.details)
+            ? j.error.details.find(d => d && (d.retryDelay || (d['@type'] || '').includes('RetryInfo')))
+            : null;
+          if (retryInfo && retryInfo.retryDelay) {
+            const m = String(retryInfo.retryDelay).match(/([\d.]+)s?/);
+            if (m) retryMs = Math.ceil(parseFloat(m[1]) * 1000);
+          }
+        } catch (e) { /* ignore */ }
+
+        const ra = res.headers && res.headers.get && res.headers.get('retry-after');
+        if (ra && !retryMs) {
+          const n = parseInt(ra, 10);
+          if (!isNaN(n)) retryMs = n * 1000;
+        }
+
+        if (res.status === 429) {
+          const wait = retryMs || (baseMs * attempt);
+          lastErr = new Error(
+            `할당량 초과(429). 무료 티어 분당/일일 한도에 걸렸습니다.\n` +
+            `${Math.ceil(wait / 1000)}초 후 자동 재시도합니다…\n` +
+            String(detail).slice(0, 220)
+          );
+          console.warn('[Gemini] 429', { model, attempt, wait, reason, detail });
+          if (attempt < maxRetries || mi < models.length - 1) {
+            progress(`할당량 초과 — ${Math.ceil(wait / 1000)}초 대기 후 재시도…`);
+            await sleep(wait);
+            continue;
+          }
+          throw new Error(
+            'Gemini 할당량 초과(429)\n\n' +
+            '무료 API는 분당·일일 요청 수 제한이 있습니다.\n' +
+            '1~2분 기다린 뒤 다시 시도하거나,\n' +
+            'AI Studio → 사용량에서 할당량을 확인하세요.\n\n' +
+            String(detail).slice(0, 280)
+          );
+        }
+
+        /* 종료·신규 차단 모델 → 같은 모델 재시도 없이 다음 모델로 */
+        if (res.status === 404) {
+          lastErr = new Error(`모델 사용 불가(404): ${model}\n${String(detail).slice(0, 280)}`);
+          console.warn('[Gemini] 404 model unavailable', { model, detail });
+          progress(`${model} 사용 불가 — 다음 모델로 전환…`);
+          break;
+        }
+
+        let hint = '';
+        if (res.status === 401) {
+          hint = reason === 'ACCESS_TOKEN_TYPE_UNSUPPORTED'
+            ? ' (401: AQ. 키/프로젝트 권한 확인)'
+            : ' (401: x-goog-api-key·키 값 확인)';
+        } else if (res.status === 403) hint = ' (403: 키 제한/권한)';
+        else if (res.status >= 500) hint = ' (서버 오류)';
+
+        lastErr = new Error(`Gemini HTTP ${res.status}${hint}\n${String(detail).slice(0, 400)}`);
+        console.error('[Gemini]', lastErr.message, { status: res.status, model, body: errTxt });
+        /* 401/403은 재시도해도 무의미 */
+        if (res.status === 401 || res.status === 403) throw lastErr;
+        if (attempt < maxRetries) {
+          await sleep(baseMs * attempt);
+          continue;
+        }
+        break;
+      }
+    }
+    throw lastErr || new Error('Gemini 요청 실패');
+  },
+
+  /** Gemini 응답 → 앱 운동 객체 배열 */
+  mapAiExercises(list) {
+    return (list || []).map(item => {
+      const type = item.type === 'cardio' ? 'cardio' : 'weight';
+      if (type === 'cardio') {
+        return ex({
+          name: String(item.name || 'Zone2 유산소').trim(),
+          type: 'cardio',
+          targetMin: Math.max(5, +item.targetMin || 20),
+          rest: 0,
+          equip: '유산소',
+          note: String(item.note || '').trim()
+        });
+      }
+      const lift = ['스쿼트', '벤치프레스', '데드리프트'].includes(item.lift) ? item.lift : '';
+      const equipOk = ['바벨', '덤벨', '머신', '케이블', '맨몸'].includes(item.equip);
+      return ex({
+        name: String(item.name || '운동').trim(),
+        type: 'weight',
+        equip: equipOk ? item.equip : '머신',
+        lift,
+        sets: Math.min(12, Math.max(1, +item.sets || 3)),
+        repLo: Math.max(1, +item.repLo || 8),
+        repHi: Math.max(1, +item.repHi || 12),
+        rir: Math.min(4, Math.max(0, +item.rir || 1)),
+        rest: Math.max(0, +item.rest || 120),
+        note: String(item.note || '').trim()
+      });
+    });
   },
 
   paint() {

@@ -433,6 +433,17 @@ const Store = {
     return data;
   },
 
+  async deleteCommunityPost(postId) {
+    if (!cloudEnabled() || !this.user) throw new Error('로그인이 필요합니다');
+    if (!postId) throw new Error('게시글이 없습니다');
+    const { error } = await sb.from(CFG.TABLE_POSTS)
+      .delete()
+      .eq('id', postId)
+      .eq('user_id', this.user.id);
+    if (error) throw error;
+    return true;
+  },
+
   /** 세션 종료 자동 피드 — 실패해도 조용히 무시 */
   async postWorkoutComplete(volumeKg) {
     if (!cloudEnabled() || !this.user) return null;
@@ -530,7 +541,7 @@ const Store = {
       const style = onProgress;
       onProgress = arguments[2];
       const focusMap = {
-        upper: ['chest', 'back', 'shoulders', 'arms'],
+        upper: ['chest', 'back', 'shoulders', 'biceps', 'triceps'],
         lower: ['legs'],
         beginner_full: ['chest', 'back', 'legs', 'core'],
         auto: ['chest', 'back', 'legs']
@@ -550,9 +561,14 @@ const Store = {
     }
 
     const ctx = this.buildAiUserContext(opts);
+    /* 레거시 'arms' → 이두+삼두 */
+    ctx.targets = (ctx.targets || []).flatMap(t =>
+      t === 'arms' ? ['biceps', 'triceps'] : [t]
+    );
     const targetKo = {
       chest: '가슴', back: '등', shoulders: '어깨',
-      legs: '하체', arms: '팔', core: '복근'
+      legs: '하체', biceps: '이두', triceps: '삼두', core: '복근',
+      arms: '팔'
     };
     const levelKo = {
       beginner: '초보자 (기초 체력)',
@@ -567,6 +583,8 @@ const Store = {
     const targetsLabel = (ctx.targets || []).map(t => targetKo[t] || t).join(', ');
     const levelLabel = levelKo[ctx.level] || ctx.level;
     const styleLabel = styleKo[ctx.style] || ctx.style;
+    const hasBi = ctx.targets.includes('biceps');
+    const hasTri = ctx.targets.includes('triceps');
 
     const schema = {
       type: 'OBJECT',
@@ -608,6 +626,17 @@ const Store = {
       advanced: '고강도 스트렝스·고급 변형 허용, 회복도 낮은 부위는 과부하 금지.'
     }[ctx.level] || '';
 
+    let armGuide = '';
+    if (hasBi || hasTri) {
+      armGuide = `
+팔 부위 역학(필수):
+- 이두(biceps)와 삼두(triceps)는 별도 타겟이다. 선택된 쪽만 주동근으로 배치하라.
+${hasTri ? '- 삼두 선택 시: 장두·외측두 균형. 예) 오버헤드 익스텐션 + 케이블 프레스다운(또는 스컬크러셔) 조합.' : ''}
+${hasBi ? '- 이두 선택 시: 장두·단두 균형. 예) 바벨/덤벨 컬 + 해머컬 또는 프리쳐컬.' : ''}
+${hasBi && hasTri ? '- 이두+삼두 동시: 주동근/길항근 슈퍼세트(컬 ↔ 익스텐션) 권장, note에 페어를 명시.' : ''}
+- "팔" 일반 운동만 뭉뚱그리지 말고 이두/삼두 종목을 구분해서 이름에 반영하라.`;
+    }
+
     const prompt =
 `당신은 스포츠의학·근력 트레이닝 코치다. 아래 조건에 맞는 오늘 1회 세션 루틴을 JSON으로만 작성하라.
 
@@ -615,6 +644,7 @@ const Store = {
 숙련도: [${levelLabel}]
 스타일: [${styleLabel}]
 조건에 부합하는 주동근/길항근 슈퍼세트 혹은 적절한 세트·반복수(RIR/RPE 기반) 배치를 반영하라.
+${armGuide}
 
 유저 상태:
 성별=${ctx.gender}, 나이=${ctx.age ?? '미상'}, 단위=${ctx.unit}

@@ -304,14 +304,15 @@ const App = {
     if (this.editProgramId) {
       el('hSub').textContent = '루틴 편집';
       el('viewHome').innerHTML = this.buildProgramDetailHtml(this.editProgramId);
+      this.bindExerciseListDnD(el('editExList'), this.editProgramId);
       return;
     }
 
     const hintKey = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][today.getDay()];
-    const recommended = Store.s.programs.find(p => p.dayHint === hintKey);
+    const recommended = Store.s.programs.find(p => !p.instantWorkout && p.dayHint === hintKey);
 
     let routines = '';
-    Store.s.programs.forEach(p => {
+    Store.s.programs.filter(p => !p.instantWorkout).forEach(p => {
       const n = p.items.length;
       let names = p.items.slice(0, 3).map(e => e.name).join(', ');
       if (n > 3) names += ' 등';
@@ -335,6 +336,8 @@ const App = {
           루틴을 고르면 지난 기록과 이번 목표가 자동 계산됩니다.</div>
         ${routines || '<div class="emptybox">루틴이 없습니다. 루틴 관리에서 만들어 주세요.</div>'}
         <div style="height:10px"></div>
+        <button class="btn free" onclick="App.startFreeWorkout()">🏋️ 자유 운동 시작</button>
+        <div style="height:8px"></div>
         <button class="btn" onclick="App.openAiRoutineModal()">✨ AI 루틴 생성</button>
         <div style="height:8px"></div>
         <button class="btn" onclick="App.openRoutineManageModal()">⚙️ 루틴 관리</button>
@@ -352,7 +355,7 @@ const App = {
 
   buildRoutineManageInner() {
     let manage = '';
-    Store.s.programs.forEach(p => {
+    Store.s.programs.filter(p => !p.instantWorkout).forEach(p => {
       manage += `<div class="exitem">
         <div class="g"><div class="n">${esc(p.title)}</div>
           <div class="m">${p.items.length}개 운동${p.dayHint ? ' · ' + DAY_HINT_KO[p.dayHint] + '요일' : ''}</div></div>
@@ -530,10 +533,14 @@ const App = {
       return;
     }
     if (!confirm('현재까지의 운동 기록이 저장되지 않습니다. 운동을 취소하시겠습니까?')) return;
-    const { date, sessionId } = this.cur;
-    try { this.restStop(); } catch (e) { /* ignore */ }
-    Store.s.timer = null;
+    const { date, sessionId, programId } = this.cur;
+    this.clearRestTimer();
     Store.deleteWorkoutSession(date, sessionId);
+    const prog = Store.s.programs.find(x => x.id === programId);
+    if (prog && prog.instantWorkout) {
+      Store.s.programs = Store.s.programs.filter(p => p.id !== programId);
+      Store.save();
+    }
     Store.s.session = null;
     this.cur = null;
     this.releaseWakeLock();
@@ -541,9 +548,48 @@ const App = {
     this.go('home');
   },
 
+  /** 휴식 타이머 완전 정지·UI 초기화 */
+  clearRestTimer() {
+    try {
+      if (this._restIv) { clearInterval(this._restIv); this._restIv = null; }
+    } catch (e) { /* ignore */ }
+    Store.s.timer = null;
+    try { Store.save(); } catch (e) { /* ignore */ }
+    const bar = el('restbar');
+    if (bar) {
+      bar.classList.add('hide');
+      bar.classList.remove('over');
+    }
+    const tEl = el('restT');
+    if (tEl) tEl.textContent = '0:00';
+    const pEl = el('restProg');
+    if (pEl) pEl.style.width = '100%';
+    const lEl = el('restLbl');
+    if (lEl) lEl.textContent = '휴식';
+  },
+
   finishSession() {
     if (!this.cur) { this.go('home'); return; }
-    const { date, sessionId } = this.cur;
+    const { date, sessionId, programId } = this.cur;
+    const prog = Store.s.programs.find(x => x.id === programId);
+    const isFree = !!(prog && prog.instantWorkout);
+
+    if (isFree) {
+      if (!confirm('오늘의 자유 운동 기록을 저장하시겠어요?')) {
+        this.clearRestTimer();
+        Store.deleteWorkoutSession(date, sessionId);
+        Store.s.programs = Store.s.programs.filter(p => p.id !== programId);
+        Store.s.session = null;
+        this.cur = null;
+        this.releaseWakeLock();
+        Store.save();
+        toast('자유 운동이 저장되지 않았습니다');
+        this.go('home');
+        return;
+      }
+    }
+
+    this.clearRestTimer();
     const sess = getSession(date, sessionId, true);
     sess.endedAt = Date.now();
     const vol = sessionVolume(sess);
@@ -561,9 +607,107 @@ const App = {
     this.go('home');
   },
 
+  /** 빈 루틴으로 즉석 자유 운동 */
+  startFreeWorkout() {
+    const todayStr = getTodayStr();
+    if (!confirm('자유 운동을 시작하시겠습니까?')) return;
+    /* 진행 중이 아닌 옛 자유 루틴 정리 */
+    const activePid = this.cur && this.cur.programId;
+    Store.s.programs = Store.s.programs.filter(p => !p.instantWorkout || p.id === activePid);
+    const pid = 'p_free_' + Date.now().toString(36);
+    Store.s.programs.unshift({
+      id: pid,
+      title: '자유 운동',
+      desc: '즉석 종목 추가 세션',
+      dayHint: '',
+      items: [],
+      instantWorkout: true
+    });
+    Store.save();
+    this.startSession(todayStr, pid, { skipConfirm: true });
+  },
+
   activeSession() {
     if (!this.cur || !this.cur.sessionId) return null;
     return getSession(this.cur.date, this.cur.sessionId, true);
+  },
+
+  completeAllSets() {
+    if (!this.cur) return;
+    const prog = Store.s.programs.find(x => x.id === this.cur.programId);
+    const log = this.activeSession();
+    if (!prog || !log) return;
+    if (!prog.items.length) { toast('종목이 없습니다. 먼저 운동을 추가하세요'); return; }
+    if (!confirm('리스트의 모든 종목·세트를 완료 처리할까요?')) return;
+    const { date } = this.cur;
+    prog.items.forEach(e => {
+      if (!log.sets[e.id]) log.sets[e.id] = [];
+      const n = e.type === 'cardio' ? 1 : Math.max(1, e.sets || 1);
+      const tg = e.type === 'cardio' ? [] : Engine.targets(e, date, log.startedAt);
+      for (let i = 0; i < n; i++) {
+        while (log.sets[e.id].length <= i) log.sets[e.id].push({});
+        const s = log.sets[e.id][i];
+        if (e.type !== 'cardio') {
+          const t = tg[i] || {};
+          if (s.w == null || s.w === '') s.w = t.w || 0;
+          if (s.reps == null || s.reps === '') s.reps = t.reps || 0;
+          if (s.rir == null) s.rir = e.mode === 'restpause' ? 0 : e.rir;
+        }
+        s.done = true;
+        s.at = Date.now();
+      }
+    });
+    Store.save(date);
+    this.renderWorkout();
+    toast('전체 세트 완료 처리됨');
+  },
+
+  reorderProgramItems(programId, fromIdx, toIdx) {
+    const p = Store.s.programs.find(x => x.id === programId);
+    if (!p || !p.items) return;
+    const from = +fromIdx, to = +toIdx;
+    if (isNaN(from) || isNaN(to) || from === to) return;
+    if (from < 0 || to < 0 || from >= p.items.length || to >= p.items.length) return;
+    const [item] = p.items.splice(from, 1);
+    p.items.splice(to, 0, item);
+    Store.save();
+    this.render();
+  },
+
+  bindExerciseListDnD(listEl, programId) {
+    if (!listEl) return;
+    let dragFrom = null;
+    listEl.querySelectorAll('.ex-card[data-drag-idx]').forEach(card => {
+      card.setAttribute('draggable', 'true');
+      card.addEventListener('dragstart', e => {
+        dragFrom = +card.dataset.dragIdx;
+        card.classList.add('dragging');
+        try {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(dragFrom));
+        } catch (err) { /* ignore */ }
+      });
+      card.addEventListener('dragend', () => {
+        card.classList.remove('dragging');
+        listEl.querySelectorAll('.ex-card').forEach(c => c.classList.remove('drag-over'));
+        dragFrom = null;
+      });
+      card.addEventListener('dragover', e => {
+        e.preventDefault();
+        card.classList.add('drag-over');
+        try { e.dataTransfer.dropEffect = 'move'; } catch (err) { /* ignore */ }
+      });
+      card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+      card.addEventListener('drop', e => {
+        e.preventDefault();
+        card.classList.remove('drag-over');
+        const to = +card.dataset.dragIdx;
+        const from = dragFrom != null ? dragFrom : parseInt(e.dataTransfer.getData('text/plain'), 10);
+        if (!isNaN(from) && !isNaN(to) && from !== to) {
+          this.reorderProgramItems(programId, from, to);
+        }
+      });
+    });
   },
 
   renderWorkout() {
@@ -582,6 +726,7 @@ const App = {
     const elapsed = log.startedAt ? (Date.now() - log.startedAt) / 1000 : 0;
     const u = Store.s.settings.unit || 'kg';
     const sessN = getSessions(date).length;
+    const isFree = !!prog.instantWorkout;
     el('hSub').textContent = `${esc(prog.title)} · ${date}` + (sessN > 1 ? ` · #${sessN}` : '');
 
     let html = `${CardioEngine.renderDashboard()}
@@ -589,7 +734,14 @@ const App = {
         <div><div class="l">세션 경과</div><div class="v" id="sessT">${hhmmss(elapsed)}</div></div>
         <div style="text-align:center"><div class="l">완료</div><div class="v">${done}/${total}</div></div>
         <div style="text-align:right"><div class="l">진행률</div><div class="v">${total ? Math.round(done / total * 100) : 0}%</div></div>
-      </div>`;
+      </div>
+      <div id="workoutExList">`;
+
+    if (!prog.items.length) {
+      html += `<div class="card"><div class="emptybox">${isFree
+        ? '종목이 없습니다. 아래에서 즉석 추가하세요.'
+        : '이 루틴에 운동이 없습니다.'}</div></div>`;
+    }
 
     prog.items.forEach((e, ei) => {
       const tg = Engine.targets(e, date, beforeTs);
@@ -636,14 +788,15 @@ const App = {
       const firstT = tg[0] ? tg[0].text : '';
       const allSame = tg.every(x => x.text === firstT);
 
-      html += `<div class="card">
+      html += `<div class="card ex-card" data-drag-idx="${ei}">
         <div class="exhead">
+          <div class="drag-handle" title="드래그하여 순서 변경">⠿</div>
           <div style="flex:1;min-width:0">
             <div class="exname">${esc(e.name)}</div>
             <div class="exmeta">${e.type === 'cardio' ? '유산소' : esc(e.equip)}${e.lift ? ' · ' + esc(e.lift) : ''} · 휴식 ${mmss(e.rest)}${e.note ? ' · ' + esc(e.note) : ''}</div>
             <div class="prev-record">📌 ${prevLine ? '지난 수행 ' + esc(prevLine) : '이전 기록 없음 — 첫 수행'}</div>
           </div>
-          <button class="iconb" onclick="App.editExercise('${programId}',${ei})">✎</button>
+          <button class="iconb" onclick="event.stopPropagation();App.editExercise('${programId}',${ei})">✎</button>
         </div>
         <div class="target">${allSame ? '자동 처방: ' + esc(firstT) : '세트별 처방 ↓'}</div>
         ${rows}
@@ -657,13 +810,15 @@ const App = {
       </div>`;
     });
 
-    html += `<div class="card">
-      <button class="btn ghost" style="margin-bottom:12px" onclick="App.addExercise('${programId}')">➕ 이 루틴에 운동 추가</button>
+    html += `</div><div class="card">
+      <button class="btn ghost" style="margin-bottom:12px" onclick="App.addExercise('${programId}')">${isFree ? '➕ 종목 추가' : '➕ 이 루틴에 운동 추가'}</button>
+      <button class="btn" style="margin-bottom:12px;background:#059669" onclick="App.completeAllSets()">✅ 전체 운동 완료 처리</button>
       <button class="btn" onclick="App.finishSession()">세션 저장 및 종료</button>
       <div style="height:8px"></div>
       <button class="btn danger sm" onclick="App.cancelSession()">운동 취소</button>
     </div>`;
     el('viewWorkout').innerHTML = html;
+    this.bindExerciseListDnD(el('workoutExList'), programId);
   },
 
   setVal(exId, idx, field, val) {
@@ -735,7 +890,7 @@ const App = {
     t.total = Math.max(t.total + n, 1);
     Store.save(); this.renderRest();
   },
-  restStop() { Store.s.timer = null; Store.save(); this.renderRest(); },
+  restStop() { this.clearRestTimer(); },
   renderRest() {
     const t = Store.s.timer, bar = el('restbar');
     if (!bar) return;
@@ -864,6 +1019,10 @@ const App = {
     const time = t
       ? `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
       : '';
+    const isMine = !!(Store.user && p.user_id && Store.user.id === p.user_id);
+    const delBtn = isMine
+      ? `<button type="button" class="feed-del" onclick="event.stopPropagation();App.deleteCommunityPost('${p.id}')">🗑 삭제</button>`
+      : '';
     const reacts = (CFG.REACTIONS || []).map(r => {
       const n = (p.counts && p.counts[r.key]) || 0;
       const on = p.mine && p.mine[r.key] ? ' on' : '';
@@ -873,6 +1032,7 @@ const App = {
       </button>`;
     }).join('');
     return `<div class="feed-card ${p.post_type === 'workout_complete' ? 'workout' : ''}" id="post_${p.id}">
+      ${delBtn}
       <div class="fc-head">
         <span class="fc-name">${esc(p.author_name || '익명')}</span>
         <span class="fc-time">${esc(time)}${p.post_type === 'workout_complete' ? ' · 운동 완료' : ''}</span>
@@ -880,6 +1040,21 @@ const App = {
       <div class="fc-body">${esc(p.body)}</div>
       <div class="react-bar" id="reactbar_${p.id}">${reacts}</div>
     </div>`;
+  },
+
+  async deleteCommunityPost(postId) {
+    if (!Store.user) { toast('로그인이 필요합니다'); return; }
+    if (!confirm('이 글을 삭제할까요?')) return;
+    try {
+      await Store.deleteCommunityPost(postId);
+      this.communityPosts = (this.communityPosts || []).filter(p => p.id !== postId);
+      const node = el('post_' + postId);
+      if (node) node.remove();
+      else this.paintCommunityFeed(this.communityPosts);
+      toast('삭제되었습니다');
+    } catch (e) {
+      toast(e.message || '삭제 실패');
+    }
   },
 
   async submitCommunityPost() {
@@ -931,13 +1106,18 @@ const App = {
     }
     if (!Array.isArray(this._aiTargets) || !this._aiTargets.length) {
       this._aiTargets = ['chest', 'back'];
+    } else {
+      /* 레거시 'arms' → 이두·삼두 */
+      this._aiTargets = this._aiTargets.flatMap(t =>
+        t === 'arms' ? ['biceps', 'triceps'] : [t]
+      ).filter((t, i, a) => a.indexOf(t) === i);
     }
     this._aiLevel = this._aiLevel || 'intermediate';
     this._aiStyle = this._aiStyle || 'bodybuilding';
 
     const targetOpts = [
       ['chest', '가슴'], ['back', '등'], ['shoulders', '어깨'],
-      ['legs', '하체'], ['arms', '팔'], ['core', '복근']
+      ['legs', '하체'], ['biceps', '이두'], ['triceps', '삼두'], ['core', '복근']
     ];
     const levelOpts = [
       ['beginner', '초보자 (기초 체력)'],
@@ -1029,7 +1209,7 @@ const App = {
 
       const targetKo = {
         chest: '가슴', back: '등', shoulders: '어깨',
-        legs: '하체', arms: '팔', core: '복근'
+        legs: '하체', biceps: '이두', triceps: '삼두', core: '복근'
       };
       const parts = opts.targets.map(t => targetKo[t] || t).join('·');
       const pid = 'p_ai_' + Date.now().toString(36);
@@ -1078,23 +1258,37 @@ const App = {
       return '<div class="card"><div class="emptybox">루틴을 찾을 수 없습니다</div></div>';
     }
     const items = p.items.map((e, i) => `
-      <div class="exitem">
-        <div class="iconb">${i + 1}</div>
-        <div class="g"><div class="n">${esc(e.name)}</div>
-          <div class="m">${e.type === 'cardio' ? `유산소 ${e.targetMin}분`
-            : `${e.sets}세트 · ${e.mode === 'restpause' ? '총 ' : ''}${e.repLo}~${e.repHi}회 · RIR${e.rir} · ${mmss(e.rest)}`}${e.lift ? ' · ' + esc(e.lift) : ''}</div></div>
-        <button class="iconb" onclick="App.moveExercise('${pId}',${i},-1)">↑</button>
-        <button class="iconb" onclick="App.moveExercise('${pId}',${i},1)">↓</button>
-        <button class="iconb" onclick="App.editExercise('${pId}',${i})">✎</button>
-        <button class="iconb del" onclick="App.deleteExercise('${pId}',${i})">✕</button>
-      </div>`).join('') || '<div class="emptybox">운동이 없습니다</div>';
+      <div class="card ex-card edit-ex-card" data-drag-idx="${i}">
+        <div class="exhead">
+          <div class="drag-handle" title="드래그하여 순서 변경">⠿</div>
+          <div style="flex:1;min-width:0">
+            <div class="exname">${esc(e.name)}</div>
+            <div class="exmeta">${e.type === 'cardio' ? `유산소 ${e.targetMin}분`
+              : `${e.sets}세트 · ${e.mode === 'restpause' ? '총 ' : ''}${e.repLo}~${e.repHi}회 · RIR${e.rir} · 휴식 ${mmss(e.rest)}`}${e.lift ? ' · ' + esc(e.lift) : ''}${e.equip ? ' · ' + esc(e.equip) : ''}</div>
+            ${e.note ? `<div class="prev-record">${esc(e.note)}</div>` : ''}
+          </div>
+          <button class="iconb" onclick="event.stopPropagation();App.editExercise('${pId}',${i})">✎</button>
+          <button class="iconb del" onclick="event.stopPropagation();App.deleteExercise('${pId}',${i})">✕</button>
+        </div>
+        ${e.type === 'weight' ? `<div class="btnrow" style="margin-top:8px">
+          <button class="btn ghost sm" onclick="App.changeSets('${pId}',${i},1)">＋ 세트</button>
+          <button class="btn ghost sm" onclick="App.changeSets('${pId}',${i},-1)">－ 세트</button>
+          <button class="btn ghost sm" onclick="App.moveExercise('${pId}',${i},-1)">↑</button>
+          <button class="btn ghost sm" onclick="App.moveExercise('${pId}',${i},1)">↓</button>
+        </div>` : `<div class="btnrow" style="margin-top:8px">
+          <button class="btn ghost sm" onclick="App.moveExercise('${pId}',${i},-1)">↑</button>
+          <button class="btn ghost sm" onclick="App.moveExercise('${pId}',${i},1)">↓</button>
+        </div>`}
+      </div>`).join('') || '<div class="emptybox">운동이 없습니다 · 아래에서 추가하세요</div>';
     return `
       <div class="card">
         <h2>${esc(p.title)}
           <button class="pill blue" onclick="App.closeProgramDetail()">← 목록</button></h2>
         <div class="muted" style="margin-bottom:8px">${esc(p.desc || '')}</div>
-        ${items}
-        <div style="height:9px"></div>
+        <div class="tiny" style="margin-bottom:10px">⠿ 핸들을 드래그해 순서를 바꿀 수 있습니다</div>
+      </div>
+      <div id="editExList">${items}</div>
+      <div class="card">
         <button class="btn ghost sm" onclick="App.addExercise('${pId}')">＋ 운동 추가</button>
       </div>`;
   },

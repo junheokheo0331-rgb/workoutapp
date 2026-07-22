@@ -391,6 +391,38 @@ table.hist td{padding:6px 4px;border-top:1px solid var(--line);text-align:center
 .ai-sec-hint{font-size:11px;color:var(--soft);margin-top:2px;margin-bottom:2px}
 .ai-status{font-size:12.5px;color:var(--mid);min-height:1.2em;margin:6px 0 10px}
 
+/* ── 자유 운동 CTA */
+.btn.free{
+  background:linear-gradient(135deg,#0ea5e9,#38bdf8);
+  color:#fff;font-weight:800;
+  box-shadow:0 4px 14px rgba(14,165,233,.35);
+  border:1.5px solid #0284c7;
+}
+.btn.free:active{transform:translateY(1px);filter:brightness(.96)}
+
+/* ── 드래그 앤 드롭 종목 카드 */
+.ex-card[draggable="true"]{cursor:grab;touch-action:manipulation;transition:opacity .15s,box-shadow .15s,transform .15s}
+.ex-card.dragging{opacity:.55;box-shadow:0 8px 24px rgba(14,165,233,.2);transform:scale(.98)}
+.ex-card.drag-over{outline:2px dashed var(--sky-400);outline-offset:2px}
+.drag-handle{
+  width:32px;height:32px;border-radius:9px;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--sky-50);color:var(--sky-600);font-size:14px;font-weight:900;
+  cursor:grab;user-select:none;
+}
+.edit-ex-card{margin-bottom:10px}
+.edit-ex-card .exmeta{margin-top:2px}
+
+/* ── 커뮤니티 삭제 */
+.feed-card{position:relative}
+.feed-del{
+  position:absolute;top:8px;right:8px;
+  padding:5px 8px;border-radius:9px;font-size:11px;font-weight:800;
+  background:#fff;border:1px solid #fecaca;color:#dc2626;
+}
+.feed-del:active{background:#fef2f2}
+.feed-card .fc-head{padding-right:72px}
+
 /* ── 홈: 루틴 헤더 + 관리 모달 */
 .card-head-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
 .card-head-row h2{margin:0}

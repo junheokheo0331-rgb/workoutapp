@@ -1737,10 +1737,15 @@ const App = {
 };
 
 /* ---------- 부팅 ---------- */
-window.addEventListener('DOMContentLoaded', () => {
+function bootApp() {
   App.init();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { });
   document.addEventListener('touchstart', () => {
     if (App._ac && App._ac.state === 'suspended') App._ac.resume();
   }, { once: true });
-});
+}
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', bootApp);
+} else {
+  bootApp();
+}

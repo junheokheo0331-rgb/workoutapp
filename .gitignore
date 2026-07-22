@@ -21,3 +21,10 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+# ── Env / secrets (never commit) ──
+.env
+.env.local
+.env.*.local
+dist/
+node_modules/
